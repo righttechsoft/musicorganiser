@@ -22,6 +22,7 @@ A Windows desktop application for managing and playing music files, built with C
 - Click-to-seek progress bar
 - Volume control
 - Auto-play next track when current track ends
+- AI-powered artist summary (requires Anthropic API key)
 
 ### File Operations
 - Copy/Move/Delete files and folders
@@ -58,6 +59,22 @@ dotnet run --project MusicOrganiser
 
 Or run the compiled executable directly.
 
+### AI Artist Summary Setup (Optional)
+
+The app can display AI-generated summaries about artists using Claude Haiku 4.5. To enable this feature:
+
+1. Get an API key from [Anthropic Console](https://console.anthropic.com/)
+2. Create a `.env` file in the project root directory:
+   ```
+   ANTHROPIC_API_KEY=your-api-key-here
+   ```
+3. The artist summary will appear in the player panel when a track is playing
+
+The artist name is detected from:
+1. ID3 tags (Artist field)
+2. Current folder name (if no tag)
+3. Parent folder name (fallback)
+
 ### Keyboard Shortcuts
 - **Double-click** on a track to play it
 - **Right-click** on folders or files for context menu (Copy/Move/Delete)
@@ -91,6 +108,8 @@ MusicOrganiser/
 
 - [NAudio](https://github.com/naudio/NAudio) - Audio playback
 - [TagLibSharp](https://github.com/mono/taglib-sharp) - Audio metadata reading
+- [Anthropic.SDK](https://github.com/tghamm/Anthropic.SDK) - Claude AI integration for artist summaries
+- [DotNetEnv](https://github.com/tonerdo/dotnet-env) - Environment variable loading from .env files
 
 ## License
 

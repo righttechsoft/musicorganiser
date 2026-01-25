@@ -43,6 +43,8 @@ MusicOrganiser/
 
 - **MusicMetadataService** (`Services/MusicMetadataService.cs`): TagLib#-based metadata reader. Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A.
 
+- **ArtistInfoService** (`Services/ArtistInfoService.cs`): Uses Claude Haiku 4.5 API to generate artist summaries. Detects artist from ID3 tags or folder names. Requires `ANTHROPIC_API_KEY` in `.env` file.
+
 ### Key ViewModels
 
 - **MainViewModel** (`ViewModels/MainViewModel.cs`): Central state management for the application, owns all services and coordinates between folder tree, music grid, and audio player.
@@ -67,3 +69,14 @@ MusicOrganiser/
 
 - **NAudio** (2.2.1): Audio playback and volume control
 - **TagLibSharp** (2.3.0): Audio metadata reading
+- **Anthropic.SDK** (5.9.0): Claude AI API client for artist summaries
+- **DotNetEnv** (3.1.1): Environment variable loading from .env files
+
+## Configuration
+
+The app uses a `.env` file in the project root for configuration:
+```
+ANTHROPIC_API_KEY=your-api-key-here
+```
+
+The `.env` file is excluded from git via `.gitignore`.

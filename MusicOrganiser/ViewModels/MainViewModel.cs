@@ -16,6 +16,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     private readonly MusicMetadataService _metadataService;
     private readonly AudioPlayerService _audioPlayer;
     private readonly FileOperationsService _fileOperations;
+    private readonly ArtistInfoService _artistInfoService;
 
     private string _currentFolderPath = string.Empty;
     private MusicFile? _selectedFile;
@@ -28,6 +29,8 @@ public class MainViewModel : ViewModelBase, IDisposable
     private bool _disposed;
     private bool _stoppedByUser;
     private CancellationTokenSource? _loadingCts;
+    private string _artistSummary = string.Empty;
+    private bool _isLoadingArtistInfo;
 
     public FolderTreeViewModel FolderTree { get; }
     public RecentFolders RecentFolders { get; }
@@ -116,6 +119,18 @@ public class MainViewModel : ViewModelBase, IDisposable
     public string CurrentPositionFormatted => FormatTime(CurrentPosition);
     public string TotalDurationFormatted => FormatTime(TotalDuration);
 
+    public string ArtistSummary
+    {
+        get => _artistSummary;
+        set => SetProperty(ref _artistSummary, value);
+    }
+
+    public bool IsLoadingArtistInfo
+    {
+        get => _isLoadingArtistInfo;
+        set => SetProperty(ref _isLoadingArtistInfo, value);
+    }
+
     public ICommand PlayPauseCommand { get; }
     public ICommand StopCommand { get; }
     public ICommand PreviousCommand { get; }
@@ -130,6 +145,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         _metadataService = new MusicMetadataService();
         _audioPlayer = new AudioPlayerService();
         _fileOperations = new FileOperationsService(_audioPlayer);
+        _artistInfoService = new ArtistInfoService();
 
         FolderTree = new FolderTreeViewModel();
         RecentFolders = RecentFolders.Load();
@@ -191,12 +207,43 @@ public class MainViewModel : ViewModelBase, IDisposable
             NowPlaying = file;
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
+
+            // Fetch artist info asynchronously
+            _ = FetchArtistInfoAsync(file);
         }
         catch
         {
             // Handle playback error
             NowPlaying = null;
             IsPlaying = false;
+        }
+    }
+
+    private async Task FetchArtistInfoAsync(MusicFile file)
+    {
+        var artistName = _artistInfoService.DetectArtistName(file.Artist, file.FullPath);
+
+        if (string.IsNullOrWhiteSpace(artistName))
+        {
+            ArtistSummary = "Unknown artist";
+            return;
+        }
+
+        IsLoadingArtistInfo = true;
+        ArtistSummary = $"Loading info for {artistName}...";
+
+        try
+        {
+            var summary = await _artistInfoService.GetArtistSummaryAsync(artistName);
+            ArtistSummary = summary;
+        }
+        catch
+        {
+            ArtistSummary = $"Could not load info for {artistName}";
+        }
+        finally
+        {
+            IsLoadingArtistInfo = false;
         }
     }
 
