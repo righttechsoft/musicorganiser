@@ -223,23 +223,23 @@ public class MainViewModel : ViewModelBase, IDisposable
     {
         var artistName = _artistInfoService.DetectArtistName(file.Artist, file.FullPath);
 
-        if (string.IsNullOrWhiteSpace(artistName))
-        {
-            ArtistSummary = "Unknown artist";
-            return;
-        }
-
         IsLoadingArtistInfo = true;
-        ArtistSummary = $"Loading info for {artistName}...";
+        ArtistSummary = !string.IsNullOrWhiteSpace(artistName)
+            ? $"Loading info for {artistName}..."
+            : "Identifying artist...";
 
         try
         {
-            var summary = await _artistInfoService.GetArtistSummaryAsync(artistName);
+            var summary = await _artistInfoService.GetArtistSummaryAsync(
+                artistName,
+                file.Title,
+                file.Album,
+                file.FileName);
             ArtistSummary = summary;
         }
         catch
         {
-            ArtistSummary = $"Could not load info for {artistName}";
+            ArtistSummary = "Could not load artist info";
         }
         finally
         {
