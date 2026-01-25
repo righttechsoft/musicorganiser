@@ -7,7 +7,9 @@
       "Bash(dotnet add package:*)",
       "Bash(dotnet build:*)",
       "Bash(dotnet run:*)",
-      "Bash(dotnet list:*)"
+      "Bash(dotnet list:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)"
     ]
   }
 }
