@@ -27,7 +27,7 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
 ### Project Structure
 ```
 MusicOrganiser/
-├── Models/           # Data models (MusicFile, RecentFolders)
+├── Models/           # Data models (MusicFile, RecentFolders, ArtistInfoCache)
 ├── Services/         # Business logic services
 ├── ViewModels/       # MVVM view models
 ├── Converters/       # WPF value converters
@@ -43,7 +43,12 @@ MusicOrganiser/
 
 - **MusicMetadataService** (`Services/MusicMetadataService.cs`): TagLib#-based metadata reader. Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A.
 
-- **ArtistInfoService** (`Services/ArtistInfoService.cs`): Uses Claude Haiku 4.5 API to generate artist summaries. Detects artist from ID3 tags or folder names. Requires `ANTHROPIC_API_KEY` in `.env` file.
+- **ArtistInfoService** (`Services/ArtistInfoService.cs`): Uses Claude Haiku 4.5 API with web search to generate artist summaries. Features:
+  - Web search integration (`web_search_20250305` tool) for real-time artist lookup
+  - Agentic approach: uses artist name, song title, album, and filename as context
+  - Persistent caching of confident results to `%APPDATA%\MusicOrganiser\artist_info_cache.json`
+  - Confidence detection via `[CONFIDENT]`/`[UNCERTAIN]` markers in responses
+  - Requires `ANTHROPIC_API_KEY` in `.env` file
 
 ### Key ViewModels
 
@@ -57,13 +62,15 @@ MusicOrganiser/
 
 2. **Recent Folders**: Stored in `%APPDATA%\MusicOrganiser\recent_folders.json`. Separate lists for Copy and Move operations (10 items each).
 
-3. **Async Loading**: Folder tree and music file list use async loading to keep UI responsive. Folders load children on expansion, music files load when a folder is selected.
+3. **Artist Info Cache**: Stored in `%APPDATA%\MusicOrganiser\artist_info_cache.json`. Caches AI-generated artist summaries when confidence is high. Can be refreshed via the refresh button in the UI.
 
-4. **Folder Filtering**: Filter text propagates down the tree via `FilterText` property. Visibility is determined by `IsVisible` which checks if name matches or any child is visible.
+4. **Async Loading**: Folder tree and music file list use async loading to keep UI responsive. Folders load children on expansion, music files load when a folder is selected.
 
-5. **Folder Sorting**: Sort option propagates down the tree via `SortOption` property. Supports Name (A-Z/Z-A), Creation Date, and Modified Date in both ascending and descending order.
+5. **Folder Filtering**: Filter text propagates down the tree via `FilterText` property. Visibility is determined by `IsVisible` which checks if name matches or any child is visible.
 
-6. **Right-Click Context Menus**: Use `MouseRightButtonDown` (bubbling event) with `e.Handled = true` to correctly identify the clicked item. Do not overwrite the clicked item reference in menu opened handlers.
+6. **Folder Sorting**: Sort option propagates down the tree via `SortOption` property. Supports Name (A-Z/Z-A), Creation Date, and Modified Date in both ascending and descending order.
+
+7. **Right-Click Context Menus**: Use `MouseRightButtonDown` (bubbling event) with `e.Handled = true` to correctly identify the clicked item. Do not overwrite the clicked item reference in menu opened handlers.
 
 ## Dependencies
 

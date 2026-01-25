@@ -7,13 +7,14 @@
         mc:Ignorable="d"
         Title="Music Organiser" Height="700" Width="1200"
         WindowStartupLocation="CenterScreen"
-        Icon="logo.png">
+        Icon="logo.ico">
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <converters:NowPlayingConverter x:Key="NowPlayingConverter"/>
         <converters:NowPlayingBoolConverter x:Key="NowPlayingBoolConverter"/>
         <converters:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
+        <converters:NullToBoolConverter x:Key="NullToBoolConverter"/>
 
         <Style x:Key="PlayerButtonStyle" TargetType="Button">
             <Setter Property="Width" Value="40"/>
@@ -257,7 +258,18 @@
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock Grid.Row="0" Text="Artist Info" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                            <!-- Header with refresh button -->
+                            <Grid Grid.Row="0" Margin="0,0,0,5">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Artist Info" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="&#8635;" FontSize="14" Padding="5,2"
+                                        Command="{Binding RefreshArtistInfoCommand}"
+                                        ToolTip="Refresh artist info"
+                                        IsEnabled="{Binding NowPlaying, Converter={StaticResource NullToBoolConverter}}"/>
+                            </Grid>
 
                             <TextBlock Grid.Row="1"
                                        Text="{Binding ArtistSummary, FallbackValue='Select a track to see artist info'}"

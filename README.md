@@ -22,7 +22,13 @@ A Windows desktop application for managing and playing music files, built with C
 - Click-to-seek progress bar
 - Volume control
 - Auto-play next track when current track ends
-- AI-powered artist summary (requires Anthropic API key)
+
+### AI Artist Info Panel
+- AI-powered artist summaries using Claude with web search
+- Automatically identifies artists from tags, song titles, and filenames
+- Persistent caching of artist info for faster loading
+- Refresh button to re-fetch artist information
+- Requires Anthropic API key
 
 ### File Operations
 - Copy/Move/Delete files and folders
@@ -59,21 +65,24 @@ dotnet run --project MusicOrganiser
 
 Or run the compiled executable directly.
 
-### AI Artist Summary Setup (Optional)
+### AI Artist Info Setup (Optional)
 
-The app can display AI-generated summaries about artists using Claude Haiku 4.5. To enable this feature:
+The app displays AI-generated artist summaries using Claude Haiku 4.5 with web search. To enable:
 
 1. Get an API key from [Anthropic Console](https://console.anthropic.com/)
 2. Create a `.env` file in the project root directory:
    ```
    ANTHROPIC_API_KEY=your-api-key-here
    ```
-3. The artist summary will appear in the player panel when a track is playing
+3. The artist info panel appears on the right side of the player
 
-The artist name is detected from:
-1. ID3 tags (Artist field)
-2. Current folder name (if no tag)
-3. Parent folder name (fallback)
+**How it works:**
+- Uses web search to find real-time information about artists
+- Identifies artists from ID3 tags, song titles, album names, and filenames
+- Caches confident results locally for faster subsequent lookups
+- Click the refresh button (↻) to re-fetch artist info
+
+**Note:** Web search costs $10 per 1,000 searches in addition to token costs.
 
 ### Keyboard Shortcuts
 - **Double-click** on a track to play it

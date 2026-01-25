@@ -136,6 +136,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand PreviousCommand { get; }
     public ICommand NextCommand { get; }
     public ICommand PlayFileCommand { get; }
+    public ICommand RefreshArtistInfoCommand { get; }
 
     public AudioPlayerService AudioPlayer => _audioPlayer;
     public FileOperationsService FileOperations => _fileOperations;
@@ -158,6 +159,15 @@ public class MainViewModel : ViewModelBase, IDisposable
         PreviousCommand = new RelayCommand(Previous);
         NextCommand = new RelayCommand(Next);
         PlayFileCommand = new RelayCommand(PlayFile);
+        RefreshArtistInfoCommand = new RelayCommand(RefreshArtistInfo);
+    }
+
+    private void RefreshArtistInfo()
+    {
+        if (NowPlaying != null)
+        {
+            _ = FetchArtistInfoAsync(NowPlaying, forceRefresh: true);
+        }
     }
 
     public void LoadFolder(string path)
@@ -219,23 +229,34 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async Task FetchArtistInfoAsync(MusicFile file)
+    private async Task FetchArtistInfoAsync(MusicFile file, bool forceRefresh = false)
     {
         var artistName = _artistInfoService.DetectArtistName(file.Artist, file.FullPath);
 
         IsLoadingArtistInfo = true;
-        ArtistSummary = !string.IsNullOrWhiteSpace(artistName)
-            ? $"Loading info for {artistName}..."
-            : "Identifying artist...";
+        ArtistSummary = forceRefresh
+            ? "Refreshing artist info..."
+            : (!string.IsNullOrWhiteSpace(artistName)
+                ? $"Loading info for {artistName}..."
+                : "Identifying artist...");
 
         try
         {
-            var summary = await _artistInfoService.GetArtistSummaryAsync(
+            // Clear cache if forcing refresh
+            if (forceRefresh)
+            {
+                _artistInfoService.ClearCache(artistName);
+            }
+
+            var result = await _artistInfoService.GetArtistSummaryAsync(
                 artistName,
                 file.Title,
                 file.Album,
-                file.FileName);
-            ArtistSummary = summary;
+                file.FileName,
+                forceRefresh);
+
+            var prefix = result.FromCache ? "[Cached] " : "";
+            ArtistSummary = prefix + result.Summary;
         }
         catch
         {

@@ -1,20 +1,32 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
-using Anthropic.SDK;
-using Anthropic.SDK.Messaging;
+using MusicOrganiser.Models;
 
 namespace MusicOrganiser.Services;
 
+public class ArtistInfoResult
+{
+    public string Summary { get; set; } = string.Empty;
+    public string? IdentifiedArtist { get; set; }
+    public bool IsConfident { get; set; }
+    public bool FromCache { get; set; }
+}
+
 public class ArtistInfoService
 {
-    private AnthropicClient? _client;
-    private string? _lastArtistKey;
-    private string? _cachedSummary;
+    private HttpClient? _httpClient;
+    private string? _apiKey;
+    private readonly ArtistInfoCache _cache;
 
     public ArtistInfoService()
     {
+        _cache = ArtistInfoCache.Load();
         LoadApiKey();
     }
 
@@ -28,10 +40,13 @@ public class ArtistInfoService
             DotNetEnv.Env.Load(envPath);
         }
 
-        var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
-        if (!string.IsNullOrEmpty(apiKey))
+        _apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY");
+        if (!string.IsNullOrEmpty(_apiKey))
         {
-            _client = new AnthropicClient(apiKey);
+            _httpClient = new HttpClient();
+            _httpClient.BaseAddress = new Uri("https://api.anthropic.com/");
+            _httpClient.DefaultRequestHeaders.Add("x-api-key", _apiKey);
+            _httpClient.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
         }
     }
 
@@ -88,170 +103,186 @@ public class ArtistInfoService
         return name.Length <= 3 && name.Contains(':');
     }
 
-    public async Task<string> GetArtistSummaryAsync(string? artistName, string? songTitle, string? album, string fileName)
+    public async Task<ArtistInfoResult> GetArtistSummaryAsync(string? artistName, string? songTitle, string? album, string fileName, bool forceRefresh = false)
     {
-        if (_client == null)
+        if (_httpClient == null)
         {
-            return "API key not configured. Add ANTHROPIC_API_KEY to .env file.";
+            return new ArtistInfoResult
+            {
+                Summary = "API key not configured. Add ANTHROPIC_API_KEY to .env file.",
+                IsConfident = false
+            };
         }
 
-        // Create a cache key from all available info
-        var cacheKey = $"{artistName}|{songTitle}|{album}|{fileName}";
-        if (_lastArtistKey == cacheKey && _cachedSummary != null)
+        // Check persistent cache first (unless forcing refresh)
+        if (!forceRefresh && !string.IsNullOrWhiteSpace(artistName))
         {
-            return _cachedSummary;
+            var cached = _cache.Get(artistName);
+            if (cached != null)
+            {
+                return new ArtistInfoResult
+                {
+                    Summary = cached.Summary,
+                    IdentifiedArtist = cached.ArtistName,
+                    IsConfident = true,
+                    FromCache = true
+                };
+            }
         }
 
         try
         {
-            // Step 1: Try with artist name if available
-            string? summary = null;
-            bool isUncertain = true;
+            // Build context with all available information
+            var contextBuilder = new StringBuilder();
+            contextBuilder.AppendLine("I need to identify a music artist. Here's the information from the audio file:");
+            contextBuilder.AppendLine();
 
             if (!string.IsNullOrWhiteSpace(artistName))
+                contextBuilder.AppendLine($"- Artist tag/folder: {artistName}");
+            if (!string.IsNullOrWhiteSpace(songTitle))
+                contextBuilder.AppendLine($"- Song title: {songTitle}");
+            if (!string.IsNullOrWhiteSpace(album))
+                contextBuilder.AppendLine($"- Album: {album}");
+
+            var cleanFileName = Path.GetFileNameWithoutExtension(fileName);
+            if (!string.IsNullOrWhiteSpace(cleanFileName))
+                contextBuilder.AppendLine($"- File name: {cleanFileName}");
+
+            contextBuilder.AppendLine();
+            contextBuilder.AppendLine("Please use web search to find information about this artist. Search for the artist name combined with the song title if needed.");
+            contextBuilder.AppendLine();
+            contextBuilder.AppendLine("IMPORTANT: At the start of your response, indicate your confidence:");
+            contextBuilder.AppendLine("- Start with [CONFIDENT] if you found reliable information about the artist");
+            contextBuilder.AppendLine("- Start with [UNCERTAIN] if you couldn't identify the artist reliably");
+            contextBuilder.AppendLine();
+            contextBuilder.AppendLine("Then provide a brief summary (2-3 sentences) about the artist including their genre and a notable fact.");
+
+            var response = await SendQueryWithWebSearchAsync(contextBuilder.ToString());
+            var result = ParseResponse(response, artistName);
+
+            // Save to cache if confident
+            if (result.IsConfident && !string.IsNullOrWhiteSpace(result.IdentifiedArtist))
             {
-                summary = await QueryArtistAsync(artistName, null, null);
-                isUncertain = IsUncertainResult(summary);
+                _cache.Set(result.IdentifiedArtist, result.Summary, true);
             }
 
-            // Step 2: If uncertain or no artist, try with more context
-            if (isUncertain && HasAdditionalContext(songTitle, album, fileName))
-            {
-                var contextualQuery = await QueryWithFullContextAsync(artistName, songTitle, album, fileName);
-                if (!IsUncertainResult(contextualQuery))
-                {
-                    summary = contextualQuery;
-                }
-            }
-
-            // Step 3: If still uncertain, try one more approach - search by song
-            if (IsUncertainResult(summary) && !string.IsNullOrWhiteSpace(songTitle))
-            {
-                var songBasedQuery = await QueryBySongAsync(songTitle, fileName);
-                if (!IsUncertainResult(songBasedQuery))
-                {
-                    summary = songBasedQuery;
-                }
-            }
-
-            summary ??= "Could not find information about this artist.";
-
-            _lastArtistKey = cacheKey;
-            _cachedSummary = summary;
-
-            return summary;
+            return result;
         }
         catch (Exception ex)
         {
-            return $"Error: {ex.Message}";
+            return new ArtistInfoResult
+            {
+                Summary = $"Error: {ex.Message}",
+                IsConfident = false
+            };
         }
     }
 
-    private bool HasAdditionalContext(string? songTitle, string? album, string fileName)
+    private ArtistInfoResult ParseResponse(string response, string? providedArtist)
     {
-        return !string.IsNullOrWhiteSpace(songTitle) ||
-               !string.IsNullOrWhiteSpace(album) ||
-               !string.IsNullOrWhiteSpace(fileName);
-    }
+        var isConfident = response.Contains("[CONFIDENT]");
+        var summary = response
+            .Replace("[CONFIDENT]", "")
+            .Replace("[UNCERTAIN]", "")
+            .Trim();
 
-    private bool IsUncertainResult(string? result)
-    {
-        if (string.IsNullOrWhiteSpace(result)) return true;
-
-        var lowerResult = result.ToLowerInvariant();
-        return lowerResult.Contains("unknown artist") ||
-               lowerResult.Contains("i don't have information") ||
-               lowerResult.Contains("i don't know") ||
-               lowerResult.Contains("i'm not familiar") ||
-               lowerResult.Contains("i am not familiar") ||
-               lowerResult.Contains("couldn't find") ||
-               lowerResult.Contains("could not find") ||
-               lowerResult.Contains("no information") ||
-               lowerResult.Contains("not sure who") ||
-               lowerResult.Contains("unable to identify");
-    }
-
-    private async Task<string> QueryArtistAsync(string artistName, string? songTitle, string? album)
-    {
-        var prompt = $@"Search your knowledge for the music artist ""{artistName}"".
-Provide a brief summary (2-3 sentences) about this artist including their main genre and a notable fact.
-If you're not certain about this artist, say ""Unknown artist"".";
-
-        return await SendQueryAsync(prompt);
-    }
-
-    private async Task<string> QueryWithFullContextAsync(string? artistName, string? songTitle, string? album, string fileName)
-    {
-        var contextParts = new List<string>();
-
-        if (!string.IsNullOrWhiteSpace(artistName))
-            contextParts.Add($"Artist: {artistName}");
-        if (!string.IsNullOrWhiteSpace(songTitle))
-            contextParts.Add($"Song title: {songTitle}");
-        if (!string.IsNullOrWhiteSpace(album))
-            contextParts.Add($"Album: {album}");
-
-        var cleanFileName = Path.GetFileNameWithoutExtension(fileName);
-        contextParts.Add($"File name: {cleanFileName}");
-
-        var context = string.Join("\n", contextParts);
-
-        var prompt = $@"I'm trying to identify a music artist. Here's all the information I have:
-
-{context}
-
-Based on this information, search your knowledge to identify the artist and provide a brief summary (2-3 sentences) about them, including their main genre and a notable fact.
-
-If the artist name seems incomplete or ambiguous, use the song title and other context to determine who this might be.
-If you still cannot identify the artist with reasonable confidence, say ""Unknown artist"".";
-
-        return await SendQueryAsync(prompt);
-    }
-
-    private async Task<string> QueryBySongAsync(string songTitle, string fileName)
-    {
-        var cleanFileName = Path.GetFileNameWithoutExtension(fileName);
-
-        var prompt = $@"I'm trying to identify a music artist from a song.
-Song title: {songTitle}
-File name: {cleanFileName}
-
-Search your knowledge to identify who performs this song. If you can identify the artist, provide a brief summary (2-3 sentences) about them, including their main genre and a notable fact.
-
-If you cannot identify the artist with reasonable confidence, say ""Unknown artist"".";
-
-        return await SendQueryAsync(prompt);
-    }
-
-    private async Task<string> SendQueryAsync(string prompt)
-    {
-        var messages = new List<Message>
+        return new ArtistInfoResult
         {
-            new Message(RoleType.User, prompt)
+            Summary = summary,
+            IdentifiedArtist = isConfident ? providedArtist : null,
+            IsConfident = isConfident,
+            FromCache = false
         };
+    }
 
-        var parameters = new MessageParameters
+    public void ClearCache(string? artistName)
+    {
+        if (!string.IsNullOrWhiteSpace(artistName))
         {
-            Model = "claude-haiku-4-5",
-            MaxTokens = 200,
-            Messages = messages,
-            System = new List<SystemMessage>
+            _cache.Remove(artistName);
+        }
+    }
+
+    private async Task<string> SendQueryWithWebSearchAsync(string prompt)
+    {
+        var requestBody = new
+        {
+            model = "claude-haiku-4-5",
+            max_tokens = 300,
+            system = @"You are a music expert assistant. Your task is to identify music artists and provide brief, accurate summaries.
+
+IMPORTANT: Always use the web_search tool to look up information about the artist. Search for:
+1. The artist name + song title together
+2. Just the song title if the artist is unknown
+3. The artist name alone
+
+Use the search results to provide accurate, up-to-date information about the artist.
+Keep responses to 2-3 sentences. Include the artist's primary genre and one notable achievement or fact.",
+            messages = new[]
             {
-                new SystemMessage(@"You are a music expert assistant. Your task is to identify music artists and provide brief, accurate summaries about them.
-
-When searching for artist information:
-1. Use your comprehensive knowledge of music artists across all genres and eras
-2. Consider different spellings, stage names, and band name variations
-3. Use song titles and album names as clues when the artist name is ambiguous
-4. Be confident when you have reliable information, but say ""Unknown artist"" if genuinely uncertain
-
-Keep responses concise (2-3 sentences) and factual. Include the artist's primary genre and one notable achievement or fact.")
+                new { role = "user", content = prompt }
+            },
+            tools = new object[]
+            {
+                new
+                {
+                    type = "web_search_20250305",
+                    name = "web_search",
+                    max_uses = 3
+                }
             }
         };
 
-        var response = await _client!.Messages.GetClaudeMessageAsync(parameters);
-        return response.Message?.ToString() ?? "Unable to get artist info.";
+        var json = JsonSerializer.Serialize(requestBody);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        var response = await _httpClient!.PostAsync("v1/messages", content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return $"API error: {response.StatusCode}";
+        }
+
+        // Parse the response to extract the text content
+        return ExtractTextFromResponse(responseBody);
     }
 
-    public bool IsConfigured => _client != null;
+    private string ExtractTextFromResponse(string responseJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("content", out var contentArray))
+            {
+                var textParts = new StringBuilder();
+
+                foreach (var block in contentArray.EnumerateArray())
+                {
+                    if (block.TryGetProperty("type", out var typeElement) &&
+                        typeElement.GetString() == "text" &&
+                        block.TryGetProperty("text", out var textElement))
+                    {
+                        textParts.Append(textElement.GetString());
+                    }
+                }
+
+                var result = textParts.ToString().Trim();
+                if (!string.IsNullOrEmpty(result))
+                {
+                    return result;
+                }
+            }
+
+            return "Could not parse response.";
+        }
+        catch
+        {
+            return "Could not parse response.";
+        }
+    }
+
+    public bool IsConfigured => _httpClient != null;
 }
