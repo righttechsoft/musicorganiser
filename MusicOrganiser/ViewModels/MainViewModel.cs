@@ -17,6 +17,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     private readonly AudioPlayerService _audioPlayer;
     private readonly FileOperationsService _fileOperations;
     private readonly ArtistInfoService _artistInfoService;
+    private readonly AppSettings _appSettings;
 
     private string _currentFolderPath = string.Empty;
     private MusicFile? _selectedFile;
@@ -85,6 +86,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         set
         {
             _audioPlayer.Volume = (float)(value / 100);
+            _appSettings.Volume = (int)value;
+            _appSettings.Save();
             OnPropertyChanged(nameof(Volume));
         }
     }
@@ -147,9 +150,13 @@ public class MainViewModel : ViewModelBase, IDisposable
         _audioPlayer = new AudioPlayerService();
         _fileOperations = new FileOperationsService(_audioPlayer);
         _artistInfoService = new ArtistInfoService();
+        _appSettings = AppSettings.Load();
 
         FolderTree = new FolderTreeViewModel();
         RecentFolders = RecentFolders.Load();
+
+        // Restore volume from settings
+        _audioPlayer.Volume = _appSettings.Volume / 100f;
 
         _audioPlayer.PositionChanged += OnPositionChanged;
         _audioPlayer.PlaybackStopped += OnPlaybackStopped;
