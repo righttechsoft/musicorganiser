@@ -41,9 +41,16 @@ public class FolderNode : ViewModelBase
     private readonly bool _isDummy;
     private string _filterText = string.Empty;
     private FolderSortOption _sortOption = FolderSortOption.NameAsc;
+    private bool _isDeleted;
 
     public string Name { get; }
     public string FullPath { get; }
+
+    public bool IsDeleted
+    {
+        get => _isDeleted;
+        set => SetProperty(ref _isDeleted, value);
+    }
     public ObservableCollection<FolderNode> Children { get; } = new();
 
     public string FilterText
@@ -253,6 +260,33 @@ public class FolderNode : ViewModelBase
             _ = LoadChildrenAsync();
         }
     }
+
+    public FolderNode? FindNode(string path)
+    {
+        if (string.Equals(FullPath, path, StringComparison.OrdinalIgnoreCase))
+            return this;
+
+        foreach (var child in Children)
+        {
+            var found = child.FindNode(path);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    public bool RemoveChild(FolderNode node)
+    {
+        if (Children.Remove(node))
+            return true;
+
+        foreach (var child in Children)
+        {
+            if (child.RemoveChild(node))
+                return true;
+        }
+        return false;
+    }
 }
 
 public class FolderTreeViewModel : ViewModelBase
@@ -361,5 +395,31 @@ public class FolderTreeViewModel : ViewModelBase
     public void RefreshDrives()
     {
         LoadDrives();
+    }
+
+    public void MarkFolderAsDeleted(string path)
+    {
+        foreach (var root in RootNodes)
+        {
+            var node = root.FindNode(path);
+            if (node != null)
+            {
+                node.IsDeleted = true;
+                return;
+            }
+        }
+    }
+
+    public void RemoveFolder(string path)
+    {
+        foreach (var root in RootNodes)
+        {
+            var node = root.FindNode(path);
+            if (node != null)
+            {
+                root.RemoveChild(node);
+                return;
+            }
+        }
     }
 }

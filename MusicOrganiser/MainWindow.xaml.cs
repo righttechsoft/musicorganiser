@@ -71,6 +71,16 @@ public partial class MainWindow : Window
         }
     }
 
+    private void VolumeBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is System.Windows.Controls.ProgressBar progressBar)
+        {
+            var clickPosition = e.GetPosition(progressBar);
+            var percentage = clickPosition.X / progressBar.ActualWidth;
+            ViewModel.Volume = (int)(percentage * 100);
+        }
+    }
+
     #region Folder Context Menu
 
     private void FolderContextMenu_Opened(object sender, RoutedEventArgs e)
@@ -98,11 +108,16 @@ public partial class MainWindow : Window
         if (folder != null && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddMoveFolder(folder);
-            var success = await ViewModel.FileOperations.MoveFolderAsync(_rightClickedFolder.FullPath, folder);
+            var folderPath = _rightClickedFolder.FullPath;
+            var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
             if (success)
             {
-                _rightClickedFolder.Refresh();
-                ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
+                _rightClickedFolder.IsDeleted = true;
+                // Clear music files if the moved folder was selected
+                if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    ViewModel.MusicFiles.Clear();
+                }
             }
             else
                 MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -121,10 +136,16 @@ public partial class MainWindow : Window
 
         if (result == MessageBoxResult.Yes)
         {
-            var success = await ViewModel.FileOperations.DeleteFolderAsync(_rightClickedFolder.FullPath);
+            var folderPath = _rightClickedFolder.FullPath;
+            var success = await ViewModel.FileOperations.DeleteFolderAsync(folderPath);
             if (success)
             {
-                ViewModel.FolderTree.RefreshDrives();
+                _rightClickedFolder.IsDeleted = true;
+                // Clear music files if the deleted folder was selected
+                if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    ViewModel.MusicFiles.Clear();
+                }
             }
             else
                 MessageBox.Show("Failed to delete folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -147,11 +168,16 @@ public partial class MainWindow : Window
         if (sender is MenuItem menuItem && menuItem.Tag is string folder && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddMoveFolder(folder);
-            var success = await ViewModel.FileOperations.MoveFolderAsync(_rightClickedFolder.FullPath, folder);
+            var folderPath = _rightClickedFolder.FullPath;
+            var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
             if (success)
             {
-                _rightClickedFolder.Refresh();
-                ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
+                _rightClickedFolder.IsDeleted = true;
+                // Clear music files if the moved folder was selected
+                if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    ViewModel.MusicFiles.Clear();
+                }
             }
             else
                 MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);

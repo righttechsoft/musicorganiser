@@ -54,7 +54,18 @@
                 </TreeView.ItemContainerStyle>
                 <TreeView.ItemTemplate>
                     <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                        <TextBlock Text="{Binding Name}" Padding="2"/>
+                        <TextBlock Text="{Binding Name}" Padding="2">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsDeleted}" Value="True">
+                                            <Setter Property="Foreground" Value="Gray"/>
+                                            <Setter Property="TextDecorations" Value="Strikethrough"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
                     </HierarchicalDataTemplate>
                 </TreeView.ItemTemplate>
                 <TreeView.ContextMenu>
@@ -242,10 +253,13 @@
                             <!-- Volume Control -->
                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                                 <TextBlock Text="&#128266;" FontSize="16" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                <Slider Width="80" Minimum="0" Maximum="100"
-                                        Value="{Binding Volume}"
-                                        VerticalAlignment="Center"
-                                        ToolTip="Volume"/>
+                                <ProgressBar x:Name="VolumeBar"
+                                             Width="80" Height="20"
+                                             Minimum="0" Maximum="100"
+                                             Value="{Binding Volume, Mode=OneWay}"
+                                             Cursor="Hand"
+                                             ToolTip="Volume"
+                                             MouseLeftButtonDown="VolumeBar_MouseLeftButtonDown"/>
                             </StackPanel>
                         </Grid>
                     </Grid>

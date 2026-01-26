@@ -255,8 +255,7 @@ public class MainViewModel : ViewModelBase, IDisposable
                 file.FileName,
                 forceRefresh);
 
-            var prefix = result.FromCache ? "[Cached] " : "";
-            ArtistSummary = prefix + result.Summary;
+            ArtistSummary = result.Summary;
         }
         catch
         {
