@@ -53,6 +53,15 @@ public class FolderNode : ViewModelBase
     }
     public ObservableCollection<FolderNode> Children { get; } = new();
 
+    public void MarkAsDeleted()
+    {
+        IsDeleted = true;
+        foreach (var child in Children)
+        {
+            child.MarkAsDeleted();
+        }
+    }
+
     public string FilterText
     {
         get => _filterText;
@@ -404,7 +413,7 @@ public class FolderTreeViewModel : ViewModelBase
             var node = root.FindNode(path);
             if (node != null)
             {
-                node.IsDeleted = true;
+                node.MarkAsDeleted();
                 return;
             }
         }

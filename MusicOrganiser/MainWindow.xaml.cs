@@ -112,7 +112,7 @@ public partial class MainWindow : Window
             var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
             if (success)
             {
-                _rightClickedFolder.IsDeleted = true;
+                _rightClickedFolder.MarkAsDeleted();
                 // Clear music files if the moved folder was selected
                 if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
                 {
@@ -148,7 +148,7 @@ public partial class MainWindow : Window
             await MoveFolderFilesToArtistFolders(folderPath, folder);
 
             // Mark as deleted since all files were moved out
-            _rightClickedFolder.IsDeleted = true;
+            _rightClickedFolder.MarkAsDeleted();
             if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
             {
                 ViewModel.MusicFiles.Clear();
@@ -172,7 +172,7 @@ public partial class MainWindow : Window
             var success = await ViewModel.FileOperations.DeleteFolderAsync(folderPath);
             if (success)
             {
-                _rightClickedFolder.IsDeleted = true;
+                _rightClickedFolder.MarkAsDeleted();
                 // Clear music files if the deleted folder was selected
                 if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
                 {
@@ -202,7 +202,7 @@ public partial class MainWindow : Window
             var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
             if (success)
             {
-                _rightClickedFolder.IsDeleted = true;
+                _rightClickedFolder.MarkAsDeleted();
                 // Clear music files if the moved folder was selected
                 if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
                 {
