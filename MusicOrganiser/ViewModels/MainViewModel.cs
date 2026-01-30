@@ -143,6 +143,7 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     public AudioPlayerService AudioPlayer => _audioPlayer;
     public FileOperationsService FileOperations => _fileOperations;
+    public MusicMetadataService MetadataService => _metadataService;
 
     public MainViewModel()
     {

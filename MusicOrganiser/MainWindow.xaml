@@ -70,12 +70,8 @@
                 </TreeView.ItemTemplate>
                 <TreeView.ContextMenu>
                     <ContextMenu x:Name="FolderContextMenu" Opened="FolderContextMenu_Opened">
-                        <MenuItem x:Name="FolderCopyToMenu" Header="Copy To">
-                            <MenuItem Header="Browse..." Click="FolderCopyBrowse_Click"/>
-                        </MenuItem>
-                        <MenuItem x:Name="FolderMoveToMenu" Header="Move To">
-                            <MenuItem Header="Browse..." Click="FolderMoveBrowse_Click"/>
-                        </MenuItem>
+                        <MenuItem x:Name="FolderCopyToMenu" Header="Copy To"/>
+                        <MenuItem x:Name="FolderMoveToMenu" Header="Move To"/>
                         <Separator/>
                         <MenuItem Header="Delete" Click="FolderDelete_Click"/>
                     </ContextMenu>
@@ -162,12 +158,8 @@
                 </DataGrid.Columns>
                 <DataGrid.ContextMenu>
                     <ContextMenu x:Name="FileContextMenu" Opened="FileContextMenu_Opened">
-                        <MenuItem x:Name="FileCopyToMenu" Header="Copy To">
-                            <MenuItem Header="Browse..." Click="FileCopyBrowse_Click"/>
-                        </MenuItem>
-                        <MenuItem x:Name="FileMoveToMenu" Header="Move To">
-                            <MenuItem Header="Browse..." Click="FileMoveBrowse_Click"/>
-                        </MenuItem>
+                        <MenuItem x:Name="FileCopyToMenu" Header="Copy To"/>
+                        <MenuItem x:Name="FileMoveToMenu" Header="Move To"/>
                         <Separator/>
                         <MenuItem Header="Delete" Click="FileDelete_Click"/>
                     </ContextMenu>

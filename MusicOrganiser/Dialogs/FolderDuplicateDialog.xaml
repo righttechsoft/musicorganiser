@@ -1,0 +1,149 @@
+<Window x:Class="MusicOrganiser.Dialogs.FolderDuplicateDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Folder Already Exists"
+        Height="500" Width="700"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResize"
+        MinHeight="400" MinWidth="500"
+        ShowInTaskbar="False">
+
+    <Window.Resources>
+        <Style x:Key="LabelStyle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#555555"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="Width" Value="70"/>
+        </Style>
+        <Style x:Key="ValueStyle" TargetType="TextBlock">
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,15">
+            <TextBlock Text="&#9888;" FontSize="24" Foreground="#D4A017" Margin="0,0,10,0" VerticalAlignment="Center"/>
+            <TextBlock Text="A folder with this name already exists in the destination."
+                       FontSize="14" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Folder Comparison Summary -->
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="20"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Source Folder Info -->
+            <Border Grid.Column="0" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                <StackPanel>
+                    <TextBlock Text="Source Folder" FontWeight="Bold" FontSize="13" Margin="0,0,0,8"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Name:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceFolderName" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Files:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceFileCount" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Total Size:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceTotalSize" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Arrow -->
+            <TextBlock Grid.Column="1" Text="&#10132;" FontSize="20"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+            <!-- Target Folder Info -->
+            <Border Grid.Column="2" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                <StackPanel>
+                    <TextBlock Text="Existing Folder" FontWeight="Bold" FontSize="13" Margin="0,0,0,8"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Name:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetFolderName" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Files:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetFileCount" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,2">
+                        <TextBlock Text="Total Size:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetTotalSize" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- File Comparison DataGrid -->
+        <Border Grid.Row="2" BorderBrush="#CCCCCC" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="File Comparison" FontWeight="SemiBold" Margin="10,8,10,8"/>
+
+                <DataGrid x:Name="FileComparisonGrid" Grid.Row="1"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          CanUserAddRows="False"
+                          CanUserDeleteRows="False"
+                          GridLinesVisibility="Horizontal"
+                          AlternationCount="2"
+                          HeadersVisibility="Column"
+                          BorderThickness="0">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow">
+                            <Style.Triggers>
+                                <Trigger Property="AlternationIndex" Value="1">
+                                    <Setter Property="Background" Value="#F8F8F8"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="File Name" Binding="{Binding FileName}" Width="*" MinWidth="200"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding FileSizeFormatted}" Width="80"/>
+                        <DataGridTextColumn Header="Duration" Binding="{Binding DurationFormatted}" Width="70"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+
+        <!-- Action Descriptions -->
+        <Border Grid.Row="3" Background="#F5F5F5" Padding="10" Margin="0,10,0,0">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#555555">
+                    <Run FontWeight="SemiBold">Skip:</Run><Run> Don't copy this folder</Run>
+                    <Run>   |   </Run>
+                    <Run FontWeight="SemiBold">Merge:</Run><Run> Copy missing files; prompt for duplicates</Run>
+                    <Run>   |   </Run>
+                    <Run FontWeight="SemiBold">Replace:</Run><Run> Delete existing folder and copy source</Run>
+                </TextBlock>
+            </StackPanel>
+        </Border>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+            <Button Content="Skip" Width="80" Height="28" Margin="0,0,10,0" Click="SkipButton_Click"/>
+            <Button Content="Merge" Width="80" Height="28" Margin="0,0,10,0" Click="MergeButton_Click"/>
+            <Button Content="Replace" Width="80" Height="28" Margin="0,0,10,0" Click="ReplaceButton_Click"/>
+            <Button Content="Cancel" Width="80" Height="28" IsCancel="True" Click="CancelButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

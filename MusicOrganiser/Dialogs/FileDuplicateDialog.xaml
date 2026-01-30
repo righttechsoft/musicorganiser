@@ -1,0 +1,144 @@
+<Window x:Class="MusicOrganiser.Dialogs.FileDuplicateDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="File Already Exists"
+        Height="380" Width="600"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <Style x:Key="LabelStyle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#555555"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="Width" Value="80"/>
+        </Style>
+        <Style x:Key="ValueStyle" TargetType="TextBlock">
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,15">
+            <TextBlock Text="&#9888;" FontSize="24" Foreground="#D4A017" Margin="0,0,10,0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="HeaderText" Text="A file with this name already exists in the destination."
+                       FontSize="14" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Comparison Grid -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="20"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Source File Info -->
+            <Border Grid.Column="0" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                <StackPanel>
+                    <TextBlock Text="Source File" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Name:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceFileName" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Size:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceFileSize" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Modified:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceModified" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Duration:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceDuration" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Bitrate:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceBitrate" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Artist:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceArtist" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Title:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceTitle" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Album:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="SourceAlbum" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Arrow -->
+            <TextBlock Grid.Column="1" Text="&#10132;" FontSize="20"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+            <!-- Target File Info -->
+            <Border Grid.Column="2" BorderBrush="#CCCCCC" BorderThickness="1" Padding="10">
+                <StackPanel>
+                    <TextBlock Text="Existing File" FontWeight="Bold" FontSize="13" Margin="0,0,0,10"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Name:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetFileName" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Size:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetFileSize" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Modified:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetModified" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Duration:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetDuration" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Bitrate:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetBitrate" Style="{StaticResource ValueStyle}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Artist:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetArtist" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Title:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetTitle" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,3">
+                        <TextBlock Text="Album:" Style="{StaticResource LabelStyle}"/>
+                        <TextBlock x:Name="TargetAlbum" Style="{StaticResource ValueStyle}" Width="170"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- Apply to All Checkbox -->
+        <CheckBox x:Name="ApplyToAllCheckBox" Grid.Row="2"
+                  Content="Apply to all remaining duplicates"
+                  Margin="0,15,0,0"
+                  Visibility="{Binding ShowApplyToAll, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}"/>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+            <Button Content="Skip" Width="80" Height="28" Margin="0,0,10,0" Click="SkipButton_Click"/>
+            <Button Content="Overwrite" Width="80" Height="28" Margin="0,0,10,0" Click="OverwriteButton_Click"/>
+            <Button Content="Cancel" Width="80" Height="28" IsCancel="True" Click="CancelButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

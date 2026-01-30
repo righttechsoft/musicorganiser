@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -6,6 +7,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Microsoft.Win32;
+using MusicOrganiser.Dialogs;
 using MusicOrganiser.Models;
 using MusicOrganiser.ViewModels;
 
@@ -96,9 +98,7 @@ public partial class MainWindow : Window
         if (folder != null && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddCopyFolder(folder);
-            var success = await ViewModel.FileOperations.CopyFolderAsync(_rightClickedFolder.FullPath, folder);
-            if (!success)
-                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            await CopyFolderWithDuplicateCheck(_rightClickedFolder.FullPath, folder);
         }
     }
 
@@ -121,6 +121,38 @@ public partial class MainWindow : Window
             }
             else
                 MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void FolderCopyBrowseArtist_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+
+        var folder = BrowseForFolder();
+        if (folder != null)
+        {
+            ViewModel.RecentFolders.AddCopyFolder(folder);
+            await CopyFolderFilesToArtistFolders(_rightClickedFolder.FullPath, folder);
+        }
+    }
+
+    private async void FolderMoveBrowseArtist_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+
+        var folder = BrowseForFolder();
+        if (folder != null)
+        {
+            ViewModel.RecentFolders.AddMoveFolder(folder);
+            var folderPath = _rightClickedFolder.FullPath;
+            await MoveFolderFilesToArtistFolders(folderPath, folder);
+
+            // Mark as deleted since all files were moved out
+            _rightClickedFolder.IsDeleted = true;
+            if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
+            {
+                ViewModel.MusicFiles.Clear();
+            }
         }
     }
 
@@ -157,9 +189,7 @@ public partial class MainWindow : Window
         if (sender is MenuItem menuItem && menuItem.Tag is string folder && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddCopyFolder(folder);
-            var success = await ViewModel.FileOperations.CopyFolderAsync(_rightClickedFolder.FullPath, folder);
-            if (!success)
-                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            await CopyFolderWithDuplicateCheck(_rightClickedFolder.FullPath, folder);
         }
     }
 
@@ -214,6 +244,32 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void FileCopyBrowseArtist_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedFiles = GetSelectedFiles();
+        if (selectedFiles.Count == 0) return;
+
+        var folder = BrowseForFolder();
+        if (folder != null)
+        {
+            ViewModel.RecentFolders.AddCopyFolder(folder);
+            await CopySelectedFilesToArtistFolders(folder);
+        }
+    }
+
+    private async void FileMoveBrowseArtist_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedFiles = GetSelectedFiles();
+        if (selectedFiles.Count == 0) return;
+
+        var folder = BrowseForFolder();
+        if (folder != null)
+        {
+            ViewModel.RecentFolders.AddMoveFolder(folder);
+            await MoveSelectedFilesToArtistFolders(folder);
+        }
+    }
+
     private async void FileDelete_Click(object sender, RoutedEventArgs e)
     {
         var selectedFiles = GetSelectedFiles();
@@ -260,9 +316,65 @@ public partial class MainWindow : Window
     private async System.Threading.Tasks.Task CopySelectedFiles(string destinationFolder)
     {
         var selectedFiles = GetSelectedFiles();
+        FileDuplicateAction? applyToAll = null;
+
         foreach (var file in selectedFiles)
         {
-            await ViewModel.FileOperations.CopyFileAsync(file.FullPath, destinationFolder);
+            var destPath = Path.Combine(destinationFolder, file.FileName);
+
+            if (File.Exists(destPath))
+            {
+                // Check if we already have an "apply to all" action
+                FileDuplicateAction action;
+                bool setApplyToAll = false;
+
+                if (applyToAll.HasValue)
+                {
+                    action = applyToAll.Value;
+                }
+                else
+                {
+                    // Show duplicate dialog
+                    var sourceInfo = FileComparisonInfo.FromPath(file.FullPath);
+                    var targetInfo = FileComparisonInfo.FromPath(destPath);
+                    var showApplyToAll = selectedFiles.Count > 1;
+
+                    var dialog = new FileDuplicateDialog(sourceInfo, targetInfo, showApplyToAll)
+                    {
+                        Owner = this
+                    };
+
+                    if (dialog.ShowDialog() != true)
+                    {
+                        // Dialog was closed without a choice (window X button)
+                        break;
+                    }
+
+                    action = dialog.Result;
+                    setApplyToAll = dialog.ApplyToAll;
+
+                    if (setApplyToAll && action != FileDuplicateAction.Cancel)
+                    {
+                        applyToAll = action;
+                    }
+                }
+
+                switch (action)
+                {
+                    case FileDuplicateAction.Cancel:
+                        return; // Stop entire operation
+                    case FileDuplicateAction.Skip:
+                        continue; // Skip this file
+                    case FileDuplicateAction.Overwrite:
+                        await ViewModel.FileOperations.CopyFileAsync(file.FullPath, destinationFolder, true);
+                        break;
+                }
+            }
+            else
+            {
+                // No conflict, copy normally
+                await ViewModel.FileOperations.CopyFileAsync(file.FullPath, destinationFolder, false);
+            }
         }
     }
 
@@ -276,6 +388,170 @@ public partial class MainWindow : Window
         ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
     }
 
+    private async System.Threading.Tasks.Task CopySelectedFilesToArtistFolders(string baseFolder)
+    {
+        var selectedFiles = GetSelectedFiles();
+        FileDuplicateAction? applyToAll = null;
+
+        foreach (var file in selectedFiles)
+        {
+            var artistFolder = GetArtistFolder(baseFolder, file.Artist);
+            Directory.CreateDirectory(artistFolder);
+
+            var destPath = Path.Combine(artistFolder, file.FileName);
+
+            if (File.Exists(destPath))
+            {
+                FileDuplicateAction action;
+
+                if (applyToAll.HasValue)
+                {
+                    action = applyToAll.Value;
+                }
+                else
+                {
+                    var sourceInfo = FileComparisonInfo.FromPath(file.FullPath);
+                    var targetInfo = FileComparisonInfo.FromPath(destPath);
+                    var showApplyToAll = selectedFiles.Count > 1;
+
+                    var dialog = new FileDuplicateDialog(sourceInfo, targetInfo, showApplyToAll)
+                    {
+                        Owner = this
+                    };
+
+                    if (dialog.ShowDialog() != true)
+                    {
+                        break;
+                    }
+
+                    action = dialog.Result;
+
+                    if (dialog.ApplyToAll && action != FileDuplicateAction.Cancel)
+                    {
+                        applyToAll = action;
+                    }
+                }
+
+                switch (action)
+                {
+                    case FileDuplicateAction.Cancel:
+                        return;
+                    case FileDuplicateAction.Skip:
+                        continue;
+                    case FileDuplicateAction.Overwrite:
+                        await ViewModel.FileOperations.CopyFileAsync(file.FullPath, artistFolder, true);
+                        break;
+                }
+            }
+            else
+            {
+                await ViewModel.FileOperations.CopyFileAsync(file.FullPath, artistFolder, false);
+            }
+        }
+    }
+
+    private async System.Threading.Tasks.Task MoveSelectedFilesToArtistFolders(string baseFolder)
+    {
+        var selectedFiles = GetSelectedFiles();
+
+        foreach (var file in selectedFiles)
+        {
+            var artistFolder = GetArtistFolder(baseFolder, file.Artist);
+            Directory.CreateDirectory(artistFolder);
+            await ViewModel.FileOperations.MoveFileAsync(file.FullPath, artistFolder);
+        }
+
+        ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
+    }
+
+    private static string GetArtistFolder(string baseFolder, string artist)
+    {
+        // Use "Unknown Artist" if artist is empty or whitespace
+        var folderName = string.IsNullOrWhiteSpace(artist) ? "Unknown Artist" : artist;
+
+        // Remove invalid characters from folder name
+        foreach (var c in Path.GetInvalidFileNameChars())
+        {
+            folderName = folderName.Replace(c, '_');
+        }
+
+        return Path.Combine(baseFolder, folderName);
+    }
+
+    private async System.Threading.Tasks.Task CopyFolderFilesToArtistFolders(string sourceFolder, string baseFolder)
+    {
+        var musicFiles = ViewModel.MetadataService.GetMusicFiles(sourceFolder).ToList();
+        FileDuplicateAction? applyToAll = null;
+
+        foreach (var file in musicFiles)
+        {
+            var artistFolder = GetArtistFolder(baseFolder, file.Artist);
+            Directory.CreateDirectory(artistFolder);
+
+            var destPath = Path.Combine(artistFolder, file.FileName);
+
+            if (File.Exists(destPath))
+            {
+                FileDuplicateAction action;
+
+                if (applyToAll.HasValue)
+                {
+                    action = applyToAll.Value;
+                }
+                else
+                {
+                    var sourceInfo = FileComparisonInfo.FromPath(file.FullPath);
+                    var targetInfo = FileComparisonInfo.FromPath(destPath);
+                    var showApplyToAll = musicFiles.Count > 1;
+
+                    var dialog = new FileDuplicateDialog(sourceInfo, targetInfo, showApplyToAll)
+                    {
+                        Owner = this
+                    };
+
+                    if (dialog.ShowDialog() != true)
+                    {
+                        break;
+                    }
+
+                    action = dialog.Result;
+
+                    if (dialog.ApplyToAll && action != FileDuplicateAction.Cancel)
+                    {
+                        applyToAll = action;
+                    }
+                }
+
+                switch (action)
+                {
+                    case FileDuplicateAction.Cancel:
+                        return;
+                    case FileDuplicateAction.Skip:
+                        continue;
+                    case FileDuplicateAction.Overwrite:
+                        await ViewModel.FileOperations.CopyFileAsync(file.FullPath, artistFolder, true);
+                        break;
+                }
+            }
+            else
+            {
+                await ViewModel.FileOperations.CopyFileAsync(file.FullPath, artistFolder, false);
+            }
+        }
+    }
+
+    private async System.Threading.Tasks.Task MoveFolderFilesToArtistFolders(string sourceFolder, string baseFolder)
+    {
+        var musicFiles = ViewModel.MetadataService.GetMusicFiles(sourceFolder).ToList();
+
+        foreach (var file in musicFiles)
+        {
+            var artistFolder = GetArtistFolder(baseFolder, file.Artist);
+            Directory.CreateDirectory(artistFolder);
+            await ViewModel.FileOperations.MoveFileAsync(file.FullPath, artistFolder);
+        }
+    }
+
     private List<MusicFile> GetSelectedFiles()
     {
         return MusicFilesGrid.SelectedItems.Cast<MusicFile>().ToList();
@@ -284,6 +560,94 @@ public partial class MainWindow : Window
     #endregion
 
     #region Helpers
+
+    private async System.Threading.Tasks.Task CopyFolderWithDuplicateCheck(string sourcePath, string destinationFolder)
+    {
+        var destPath = Path.Combine(destinationFolder, Path.GetFileName(sourcePath));
+
+        if (Directory.Exists(destPath))
+        {
+            // Show folder duplicate dialog
+            var sourceInfo = FolderComparisonInfo.FromPath(sourcePath);
+            var targetInfo = FolderComparisonInfo.FromPath(destPath);
+
+            var dialog = new FolderDuplicateDialog(sourceInfo, targetInfo)
+            {
+                Owner = this
+            };
+
+            if (dialog.ShowDialog() != true)
+            {
+                return; // Dialog was closed without a choice
+            }
+
+            var action = dialog.Result;
+            if (action == FolderDuplicateAction.Cancel)
+            {
+                return;
+            }
+
+            // For merge operations, we need a callback to handle file duplicates
+            FileDuplicateAction? mergeApplyToAll = null;
+            Func<string, string, FileDuplicateAction>? onFileDuplicate = null;
+
+            if (action == FolderDuplicateAction.Merge)
+            {
+                onFileDuplicate = (sourceFile, targetFile) =>
+                {
+                    // If we have an "apply to all" action, use it
+                    if (mergeApplyToAll.HasValue)
+                    {
+                        return mergeApplyToAll.Value;
+                    }
+
+                    // Show file duplicate dialog on UI thread
+                    FileDuplicateAction fileAction = FileDuplicateAction.Skip;
+
+                    Dispatcher.Invoke(() =>
+                    {
+                        var srcInfo = FileComparisonInfo.FromPath(sourceFile);
+                        var tgtInfo = FileComparisonInfo.FromPath(targetFile);
+
+                        var fileDialog = new FileDuplicateDialog(srcInfo, tgtInfo, true)
+                        {
+                            Owner = this
+                        };
+
+                        if (fileDialog.ShowDialog() == true)
+                        {
+                            fileAction = fileDialog.Result;
+                            if (fileDialog.ApplyToAll && fileAction != FileDuplicateAction.Cancel)
+                            {
+                                mergeApplyToAll = fileAction;
+                            }
+                        }
+                        else
+                        {
+                            fileAction = FileDuplicateAction.Cancel;
+                        }
+                    });
+
+                    return fileAction;
+                };
+            }
+
+            var success = await ViewModel.FileOperations.CopyFolderAsync(sourcePath, destinationFolder, action, onFileDuplicate);
+            if (!success)
+            {
+                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+        else
+        {
+            // No conflict, copy normally
+            var success = await ViewModel.FileOperations.CopyFolderAsync(sourcePath, destinationFolder);
+            if (!success)
+            {
+                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
 
     private void BuildRecentFoldersMenu(MenuItem parentMenu, List<string> recentFolders, RoutedEventHandler clickHandler)
     {
@@ -308,11 +672,19 @@ public partial class MainWindow : Window
             parentMenu.Items.Add(new Separator());
         }
 
+        // Add Browse... item
         var browseItem = new MenuItem { Header = "Browse..." };
         browseItem.Click += parentMenu == FileCopyToMenu || parentMenu == FolderCopyToMenu
             ? (parentMenu == FileCopyToMenu ? FileCopyBrowse_Click : FolderCopyBrowse_Click)
             : (parentMenu == FileMoveToMenu ? FileMoveBrowse_Click : FolderMoveBrowse_Click);
         parentMenu.Items.Add(browseItem);
+
+        // Add Browse/{artist}... item
+        var browseArtistItem = new MenuItem { Header = "Browse/{artist}..." };
+        browseArtistItem.Click += parentMenu == FileCopyToMenu || parentMenu == FolderCopyToMenu
+            ? (parentMenu == FileCopyToMenu ? FileCopyBrowseArtist_Click : FolderCopyBrowseArtist_Click)
+            : (parentMenu == FileMoveToMenu ? FileMoveBrowseArtist_Click : FolderMoveBrowseArtist_Click);
+        parentMenu.Items.Add(browseArtistItem);
     }
 
     private string? BrowseForFolder()
