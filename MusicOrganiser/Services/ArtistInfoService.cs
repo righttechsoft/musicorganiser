@@ -203,6 +203,26 @@ public class ArtistInfoService
         }
     }
 
+    public ArtistInfoResult? TryGetFromCache(string? artistName)
+    {
+        if (string.IsNullOrWhiteSpace(artistName))
+            return null;
+
+        var cached = _cache.Get(artistName);
+        if (cached != null)
+        {
+            return new ArtistInfoResult
+            {
+                Summary = cached.Summary,
+                IdentifiedArtist = cached.ArtistName,
+                IsConfident = true,
+                FromCache = true
+            };
+        }
+
+        return null;
+    }
+
     private async Task<string> SendQueryWithWebSearchAsync(string prompt)
     {
         var requestBody = new

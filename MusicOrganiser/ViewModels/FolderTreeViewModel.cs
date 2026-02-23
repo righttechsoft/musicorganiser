@@ -132,7 +132,13 @@ public class FolderNode : ViewModelBase
     public bool IsSelected
     {
         get => _isSelected;
-        set => SetProperty(ref _isSelected, value);
+        set
+        {
+            if (SetProperty(ref _isSelected, value) && value && Children.Count > 0)
+            {
+                IsExpanded = true;
+            }
+        }
     }
 
     public FolderNode(string path, string? displayName = null, bool isDummy = false)

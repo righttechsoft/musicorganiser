@@ -70,6 +70,8 @@
                 </TreeView.ItemTemplate>
                 <TreeView.ContextMenu>
                     <ContextMenu x:Name="FolderContextMenu" Opened="FolderContextMenu_Opened">
+                        <MenuItem Header="Refresh" Click="FolderRefresh_Click"/>
+                        <Separator/>
                         <MenuItem x:Name="FolderCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FolderMoveToMenu" Header="Move To"/>
                         <Separator/>
@@ -217,7 +219,7 @@
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
-                                <Button Content="&#9198;" Style="{StaticResource PlayerButtonStyle}"
+                                <Button Content="&#9664;&#9664;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding PreviousCommand}" ToolTip="Previous"/>
                                 <Button Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding PlayPauseCommand}" ToolTip="Play/Pause">
@@ -238,7 +240,7 @@
                                 </Button>
                                 <Button Content="&#9632;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding StopCommand}" ToolTip="Stop"/>
-                                <Button Content="&#9197;" Style="{StaticResource PlayerButtonStyle}"
+                                <Button Content="&#9654;&#9654;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding NextCommand}" ToolTip="Next"/>
                             </StackPanel>
 
@@ -259,30 +261,22 @@
                     <!-- Right: AI Artist Summary (30%) -->
                     <Border Grid.Column="1" BorderBrush="#CCCCCC" BorderThickness="1,0,0,0" Padding="10,0,0,0">
                         <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
 
-                            <!-- Header with refresh button -->
-                            <Grid Grid.Row="0" Margin="0,0,0,5">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Artist Info" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                <Button Grid.Column="1" Content="&#8635;" FontSize="14" Padding="5,2"
-                                        Command="{Binding RefreshArtistInfoCommand}"
-                                        ToolTip="Refresh artist info"
-                                        IsEnabled="{Binding NowPlaying, Converter={StaticResource NullToBoolConverter}}"/>
-                            </Grid>
-
-                            <TextBlock Grid.Row="1"
+                            <TextBlock Grid.Column="0"
                                        Text="{Binding ArtistSummary, FallbackValue='Select a track to see artist info'}"
                                        FontSize="11"
                                        Foreground="#555555"
                                        TextWrapping="Wrap"
                                        VerticalAlignment="Top"/>
+                            <Button Grid.Column="1" Content="&#8635;" FontSize="14" Padding="5,2"
+                                    Command="{Binding RefreshArtistInfoCommand}"
+                                    ToolTip="Load artist info"
+                                    VerticalAlignment="Top"
+                                    IsEnabled="{Binding NowPlaying, Converter={StaticResource NullToBoolConverter}}"/>
                         </Grid>
                     </Border>
                 </Grid>

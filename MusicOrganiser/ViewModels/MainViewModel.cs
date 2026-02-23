@@ -174,7 +174,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     {
         if (NowPlaying != null)
         {
-            _ = FetchArtistInfoAsync(NowPlaying, forceRefresh: true);
+            _ = FetchArtistInfoAsync(NowPlaying);
         }
     }
 
@@ -226,8 +226,8 @@ public class MainViewModel : ViewModelBase, IDisposable
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
 
-            // Fetch artist info asynchronously
-            _ = FetchArtistInfoAsync(file);
+            // Only load artist info from cache (don't fetch from API automatically)
+            LoadArtistInfoFromCache(file);
         }
         catch
         {
@@ -237,31 +237,37 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private async Task FetchArtistInfoAsync(MusicFile file, bool forceRefresh = false)
+    private void LoadArtistInfoFromCache(MusicFile file)
+    {
+        var artistName = _artistInfoService.DetectArtistName(file.Artist, file.FullPath);
+        var cached = _artistInfoService.TryGetFromCache(artistName);
+
+        if (cached != null)
+        {
+            ArtistSummary = cached.Summary;
+        }
+        else
+        {
+            ArtistSummary = "Click ↻ to load artist info";
+        }
+    }
+
+    private async Task FetchArtistInfoAsync(MusicFile file)
     {
         var artistName = _artistInfoService.DetectArtistName(file.Artist, file.FullPath);
 
         IsLoadingArtistInfo = true;
-        ArtistSummary = forceRefresh
-            ? "Refreshing artist info..."
-            : (!string.IsNullOrWhiteSpace(artistName)
-                ? $"Loading info for {artistName}..."
-                : "Identifying artist...");
+        ArtistSummary = !string.IsNullOrWhiteSpace(artistName)
+            ? $"Loading info for {artistName}..."
+            : "Identifying artist...";
 
         try
         {
-            // Clear cache if forcing refresh
-            if (forceRefresh)
-            {
-                _artistInfoService.ClearCache(artistName);
-            }
-
             var result = await _artistInfoService.GetArtistSummaryAsync(
                 artistName,
                 file.Title,
                 file.Album,
-                file.FileName,
-                forceRefresh);
+                file.FileName);
 
             ArtistSummary = result.Summary;
         }

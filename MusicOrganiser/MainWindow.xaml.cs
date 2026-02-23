@@ -92,6 +92,19 @@ public partial class MainWindow : Window
         BuildRecentFoldersMenu(FolderMoveToMenu, ViewModel.RecentFolders.MoveFolders, FolderMoveToRecent_Click);
     }
 
+    private void FolderRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+
+        _rightClickedFolder.Refresh();
+
+        // Reload music files if this folder is currently selected
+        if (_rightClickedFolder.FullPath.Equals(ViewModel.CurrentFolderPath, StringComparison.OrdinalIgnoreCase))
+        {
+            ViewModel.LoadFolder(_rightClickedFolder.FullPath);
+        }
+    }
+
     private async void FolderCopyBrowse_Click(object sender, RoutedEventArgs e)
     {
         var folder = BrowseForFolder();
