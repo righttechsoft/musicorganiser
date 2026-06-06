@@ -24,7 +24,69 @@ public partial class MainWindow : Window
         var viewModel = new MainViewModel();
         DataContext = viewModel;
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
+        viewModel.MusicFiles.CollectionChanged += (s, e) =>
+            Dispatcher.BeginInvoke(new Action(UpdateAlbumCoverPosition),
+                System.Windows.Threading.DispatcherPriority.Background);
         Closed += (s, e) => ViewModel.Dispose();
+    }
+
+    private void CoverHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
+
+    private void AlbumCoverImage_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
+
+    /// <summary>
+    /// Keeps the album cover vertically centred, but shifts it down so the file
+    /// rows don't overlap it while there is still room beneath. Once the image
+    /// reaches the bottom of the area, it stops and the semi-transparent rows
+    /// overlay it instead.
+    /// </summary>
+    private void UpdateAlbumCoverPosition()
+    {
+        if (AlbumCoverImage.Source == null)
+            return;
+
+        double area = CoverHost.ActualHeight;
+        double imgH = AlbumCoverImage.ActualHeight;
+        if (area <= 0 || imgH <= 0)
+            return;
+
+        double maxTop = Math.Max(0, area - imgH);
+        double centeredTop = maxTop / 2;
+        double rowsBottom = GetRowsBottom();
+
+        double top = Math.Min(maxTop, Math.Max(centeredTop, rowsBottom));
+
+        var m = AlbumCoverImage.Margin;
+        if (Math.Abs(m.Top - top) > 0.5)
+            AlbumCoverImage.Margin = new Thickness(m.Left, top, m.Right, m.Bottom);
+    }
+
+    private double GetRowsBottom()
+    {
+        int count = MusicFilesGrid.Items.Count;
+        if (count == 0)
+            return 0;
+
+        // Measure the bottom of the last realized row relative to the cover host.
+        for (int i = count - 1; i >= 0; i--)
+        {
+            if (MusicFilesGrid.ItemContainerGenerator.ContainerFromIndex(i) is DataGridRow row && row.IsVisible)
+            {
+                try
+                {
+                    // Add one row height as a gap between the last file and the cover.
+                    var p = row.TransformToAncestor(CoverHost).Transform(new Point(0, row.ActualHeight));
+                    return p.Y + row.ActualHeight;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+        }
+
+        // No rows realized in view: the list fills/overflows the area.
+        return CoverHost.ActualHeight;
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -51,6 +113,73 @@ public partial class MainWindow : Window
             item.IsSelected = true;
             item.Focus();
             e.Handled = true;
+        }
+    }
+
+    private async void RecentFolder_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                ViewModel.RemoveRecentPlayedFolder(path);
+                return;
+            }
+
+            ViewModel.LoadFolder(path);
+            await ViewModel.FolderTree.NavigateToPathAsync(path);
+            await Dispatcher.BeginInvoke(new Action(() => ScrollTreeToFolder(path)),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+    }
+
+    /// <summary>
+    /// Scrolls the folder tree so the node for <paramref name="path"/> is visible,
+    /// realizing virtualized containers along the way.
+    /// </summary>
+    private void ScrollTreeToFolder(string path)
+    {
+        var node = ViewModel.FolderTree.FindNode(path);
+        if (node == null) return;
+
+        // Build the root -> target chain using parent links.
+        var chain = new List<FolderNode>();
+        for (var n = node; n != null; n = n.Parent)
+            chain.Add(n);
+        chain.Reverse();
+
+        ItemsControl? parent = FolderTreeView;
+        TreeViewItem? tvi = null;
+
+        foreach (var n in chain)
+        {
+            if (parent == null) return;
+
+            tvi = parent.ItemContainerGenerator.ContainerFromItem(n) as TreeViewItem;
+            if (tvi == null)
+            {
+                parent.UpdateLayout();
+                tvi = parent.ItemContainerGenerator.ContainerFromItem(n) as TreeViewItem;
+            }
+            if (tvi == null) return;
+
+            if (n != node)
+            {
+                tvi.IsExpanded = true;
+                tvi.BringIntoView();
+                tvi.UpdateLayout();
+            }
+            parent = tvi;
+        }
+
+        tvi?.BringIntoView();
+    }
+
+    private void RemoveRecentFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.Tag is string path)
+        {
+            ViewModel.RemoveRecentPlayedFolder(path);
         }
     }
 

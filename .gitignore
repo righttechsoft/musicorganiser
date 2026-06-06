@@ -14,3 +14,9 @@ obj/
 # OS files
 Thumbs.db
 .DS_Store
+
+# Build output
+publish/
+
+# Windows reserved-name junk file
+nul

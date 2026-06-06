@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using MusicOrganiser.Models;
+using MusicOrganiser.Services;
 
 namespace MusicOrganiser.ViewModels;
 
@@ -38,6 +40,7 @@ public class FolderNode : ViewModelBase
     private bool _isSelected;
     private bool _isLoaded;
     private bool _isLoading;
+    private TaskCompletionSource<bool>? _loadTcs;
     private readonly bool _isDummy;
     private string _filterText = string.Empty;
     private FolderSortOption _sortOption = FolderSortOption.NameAsc;
@@ -45,6 +48,48 @@ public class FolderNode : ViewModelBase
 
     public string Name { get; }
     public string FullPath { get; }
+    public FolderNode? Parent { get; set; }
+
+    // User rating (1..5, null = unrated) and comma-separated tags, persisted to the cache.
+    private bool _persistEnabled;
+    private int? _rating;
+    public int? Rating
+    {
+        get => _rating;
+        set
+        {
+            if (SetProperty(ref _rating, value) && _persistEnabled)
+                Persist(() => DatabaseService.Instance.SetFolderRating(FullPath, _rating));
+        }
+    }
+
+    private string _tags = string.Empty;
+    public string Tags
+    {
+        get => _tags;
+        set
+        {
+            if (SetProperty(ref _tags, value ?? string.Empty) && _persistEnabled)
+                Persist(() => DatabaseService.Instance.SetFolderTags(FullPath, _tags));
+        }
+    }
+
+    /// <summary>Loads rating/tags from the cache without writing them back.</summary>
+    public void ApplyCache(int? rating, string? tags)
+    {
+        _rating = rating;
+        _tags = tags ?? string.Empty;
+        OnPropertyChanged(nameof(Rating));
+        OnPropertyChanged(nameof(Tags));
+    }
+
+    /// <summary>Enables write-through so subsequent user edits persist to the cache.</summary>
+    public void EnablePersist() => _persistEnabled = true;
+
+    private static void Persist(Action action)
+    {
+        try { action(); } catch { }
+    }
 
     public bool IsDeleted
     {
@@ -113,8 +158,24 @@ public class FolderNode : ViewModelBase
             if (Name.Contains(_filterText, StringComparison.OrdinalIgnoreCase))
                 return true;
 
+            // If a parent folder matched the filter, show its whole subtree unfiltered.
+            if (AncestorMatches())
+                return true;
+
             return Children.Any(c => c.IsVisible);
         }
+    }
+
+    private bool AncestorMatches()
+    {
+        var p = Parent;
+        while (p != null)
+        {
+            if (!p._isDummy && p.Name.Contains(_filterText, StringComparison.OrdinalIgnoreCase))
+                return true;
+            p = p.Parent;
+        }
+        return false;
     }
 
     public bool IsExpanded
@@ -203,15 +264,65 @@ public class FolderNode : ViewModelBase
         };
     }
 
+    private async Task AddChildNodeAsync(string dir, FolderRecord? record = null)
+    {
+        var currentFilter = _filterText;
+        var currentSort = _sortOption;
+        await Application.Current.Dispatcher.InvokeAsync(
+            () =>
+            {
+                var node = new FolderNode(dir)
+                {
+                    Parent = this,
+                    FilterText = currentFilter,
+                    SortOption = currentSort
+                };
+                if (record != null)
+                    node.ApplyCache(record.Rating, record.Tags);
+                node.EnablePersist();
+                Children.Add(node);
+            },
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    public async Task EnsureLoadedAsync()
+    {
+        if (_isLoaded) return;
+        if (_isLoading)
+        {
+            if (_loadTcs != null) await _loadTcs.Task;
+            return;
+        }
+        await LoadChildrenAsync();
+    }
+
     private async Task LoadChildrenAsync()
     {
         if (_isLoaded || _isLoading) return;
         _isLoading = true;
+        _loadTcs ??= new TaskCompletionSource<bool>();
 
         try
         {
             await Application.Current.Dispatcher.InvokeAsync(() => Children.Clear());
 
+            // 1. Cache-first: build nodes from the SQLite cache immediately.
+            List<FolderRecord> cachedRecords;
+            try { cachedRecords = DatabaseService.Instance.GetChildFolders(FullPath).ToList(); }
+            catch { cachedRecords = new List<FolderRecord>(); }
+
+            var cachedByPath = new Dictionary<string, FolderRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rec in cachedRecords)
+                cachedByPath[rec.FullPath] = rec;
+            var cachedPaths = cachedRecords.Select(c => c.FullPath).ToList();
+
+            if (cachedRecords.Count > 0)
+            {
+                foreach (var dir in SortDirectories(cachedPaths))
+                    await AddChildNodeAsync(dir, cachedByPath.TryGetValue(dir, out var rec) ? rec : null);
+            }
+
+            // 2. Filesystem refresh: enumerate, upsert the cache, and diff against the nodes.
             await Task.Run(async () =>
             {
                 try
@@ -228,25 +339,44 @@ public class FolderNode : ViewModelBase
                         })
                         .ToList();
 
-                    var sortedDirs = SortDirectories(allDirs);
+                    try { DatabaseService.Instance.UpsertFolders(FullPath, allDirs); }
+                    catch { }
 
-                    foreach (var dir in sortedDirs)
+                    // Warm the file cache for each visible subfolder in the background, so
+                    // selecting one later serves instantly from the cache.
+                    foreach (var dir in allDirs)
+                        LibraryCacheService.Instance.Enqueue(dir);
+
+                    var onDisk = new HashSet<string>(allDirs, StringComparer.OrdinalIgnoreCase);
+
+                    // Remove cached nodes whose folder no longer exists on disk.
+                    foreach (var gone in cachedPaths.Where(p => !onDisk.Contains(p)).ToList())
                     {
-                        var currentFilter = _filterText;
-                        var currentSort = _sortOption;
-
-                        await Application.Current.Dispatcher.InvokeAsync(
-                            () =>
-                            {
-                                var node = new FolderNode(dir)
-                                {
-                                    FilterText = currentFilter,
-                                    SortOption = currentSort
-                                };
-                                Children.Add(node);
-                            },
-                            System.Windows.Threading.DispatcherPriority.Background);
+                        try { DatabaseService.Instance.MarkFolderDeleted(gone); } catch { }
+                        await Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            var node = Children.FirstOrDefault(c =>
+                                !c._isDummy && string.Equals(c.FullPath, gone, StringComparison.OrdinalIgnoreCase));
+                            if (node != null) Children.Remove(node);
+                        });
                     }
+
+                    // Add nodes for folders not already shown from cache.
+                    foreach (var dir in SortDirectories(allDirs))
+                    {
+                        bool exists = await Application.Current.Dispatcher.InvokeAsync(() =>
+                            Children.Any(c => !c._isDummy &&
+                                string.Equals(c.FullPath, dir, StringComparison.OrdinalIgnoreCase)));
+                        if (!exists)
+                            await AddChildNodeAsync(dir);
+                    }
+
+                    // Restore sort order after any cache/disk merge.
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (Children.Count > 0 && !Children[0]._isDummy)
+                            ResortChildren();
+                    });
                 }
                 catch
                 {
@@ -260,6 +390,7 @@ public class FolderNode : ViewModelBase
         finally
         {
             _isLoading = false;
+            _loadTcs?.TrySetResult(true);
         }
     }
 
@@ -267,6 +398,7 @@ public class FolderNode : ViewModelBase
     {
         _isLoaded = false;
         _isLoading = false;
+        _loadTcs = null;
         Children.Clear();
         Children.Add(new FolderNode("", "Loading...", isDummy: true));
 
@@ -423,6 +555,63 @@ public class FolderTreeViewModel : ViewModelBase
                 return;
             }
         }
+    }
+
+    public async Task<bool> NavigateToPathAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+
+        var root = RootNodes.FirstOrDefault(r =>
+            path.StartsWith(r.FullPath, StringComparison.OrdinalIgnoreCase));
+        if (root == null) return false;
+
+        var current = root;
+        current.IsExpanded = true;
+        await current.EnsureLoadedAsync();
+
+        var rootPath = root.FullPath.TrimEnd('\\', '/');
+        var rest = path.Length > rootPath.Length
+            ? path.Substring(rootPath.Length).TrimStart('\\', '/')
+            : string.Empty;
+
+        if (string.IsNullOrEmpty(rest))
+        {
+            current.IsSelected = true;
+            return true;
+        }
+
+        var parts = rest.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+        var accumPath = rootPath;
+
+        for (int i = 0; i < parts.Length; i++)
+        {
+            accumPath = Path.Combine(accumPath + (i == 0 ? "\\" : ""), parts[i]);
+            // Normalize: Path.Combine("F:", "Music") returns "F:Music" — workaround above ensures "F:\Music"
+            var child = current.Children.FirstOrDefault(c =>
+                string.Equals(c.FullPath.TrimEnd('\\', '/'), accumPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+            if (child == null) return false;
+
+            current = child;
+            if (i < parts.Length - 1)
+            {
+                current.IsExpanded = true;
+                await current.EnsureLoadedAsync();
+            }
+        }
+
+        current.IsSelected = true;
+        return true;
+    }
+
+    public FolderNode? FindNode(string path)
+    {
+        foreach (var root in RootNodes)
+        {
+            var node = root.FindNode(path);
+            if (node != null)
+                return node;
+        }
+        return null;
     }
 
     public void RemoveFolder(string path)

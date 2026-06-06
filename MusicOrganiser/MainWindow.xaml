@@ -4,8 +4,9 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:converters="clr-namespace:MusicOrganiser.Converters"
+        xmlns:controls="clr-namespace:MusicOrganiser.Controls"
         mc:Ignorable="d"
-        Title="Music Organiser" Height="700" Width="1200"
+        Height="700" Width="1200"
         WindowStartupLocation="CenterScreen"
         Icon="logo.ico">
 
@@ -15,6 +16,9 @@
         <converters:NowPlayingBoolConverter x:Key="NowPlayingBoolConverter"/>
         <converters:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
         <converters:NullToBoolConverter x:Key="NullToBoolConverter"/>
+        <converters:CountToVisibilityConverter x:Key="CountToVisibilityConverter"/>
+        <converters:TitleConverter x:Key="TitleConverter"/>
+        <converters:PlayingFolderFontWeightConverter x:Key="PlayingFolderFontWeightConverter"/>
 
         <Style x:Key="PlayerButtonStyle" TargetType="Button">
             <Setter Property="Width" Value="40"/>
@@ -24,6 +28,13 @@
             <Setter Property="FontWeight" Value="Bold"/>
         </Style>
     </Window.Resources>
+
+    <Window.Title>
+        <MultiBinding Converter="{StaticResource TitleConverter}">
+            <Binding Path="CurrentFolderPath"/>
+            <Binding Path="NowPlaying"/>
+        </MultiBinding>
+    </Window.Title>
 
     <Grid>
         <Grid.ColumnDefinitions>
@@ -54,18 +65,58 @@
                 </TreeView.ItemContainerStyle>
                 <TreeView.ItemTemplate>
                     <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                        <TextBlock Text="{Binding Name}" Padding="2">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsDeleted}" Value="True">
-                                            <Setter Property="Foreground" Value="Gray"/>
-                                            <Setter Property="TextDecorations" Value="Strikethrough"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                        <StackPanel x:Name="FolderRow" Orientation="Horizontal" Background="Transparent">
+                            <TextBlock Text="{Binding Name}" Padding="2" VerticalAlignment="Center">
+                                <TextBlock.FontWeight>
+                                    <MultiBinding Converter="{StaticResource PlayingFolderFontWeightConverter}">
+                                        <Binding Path="FullPath"/>
+                                        <Binding Path="DataContext.NowPlaying.FullPath" RelativeSource="{RelativeSource AncestorType=Window}"/>
+                                    </MultiBinding>
+                                </TextBlock.FontWeight>
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsDeleted}" Value="True">
+                                                <Setter Property="Foreground" Value="Gray"/>
+                                                <Setter Property="TextDecorations" Value="Strikethrough"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <controls:StarRating Rating="{Binding Rating, Mode=TwoWay}"
+                                                 EditMode="{Binding IsMouseOver, ElementName=FolderRow}"
+                                                 VerticalAlignment="Center" Margin="6,0,0,0"/>
+                            <TextBlock Text="{Binding Tags}" VerticalAlignment="Center"
+                                       FontSize="10" Foreground="#777777" Margin="6,0,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, ElementName=FolderRow}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <TextBox Text="{Binding Tags, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                     Width="90" FontSize="10" Padding="2,0"
+                                     VerticalAlignment="Center" VerticalContentAlignment="Center"
+                                     Margin="6,0,0,0" Background="Transparent" BorderBrush="#DDDDDD"
+                                     ToolTip="Comma-separated tags">
+                                <TextBox.Style>
+                                    <Style TargetType="TextBox">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, ElementName=FolderRow}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBox.Style>
+                            </TextBox>
+                        </StackPanel>
                     </HierarchicalDataTemplate>
                 </TreeView.ItemTemplate>
                 <TreeView.ContextMenu>
@@ -105,12 +156,69 @@
         <!-- Right Panel: Music Grid + Player -->
         <Grid Grid.Column="2">
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="4*"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Music Files Grid -->
-            <DataGrid x:Name="MusicFilesGrid" Grid.Row="0"
+            <!-- Recent Played Folders -->
+            <Border Grid.Row="0" Background="#FAFAFA" BorderBrush="#CCCCCC" BorderThickness="0,0,0,1"
+                    Visibility="{Binding RecentPlayedFolders.Count, Converter={StaticResource CountToVisibilityConverter}}">
+                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Padding="4">
+                    <ItemsControl ItemsSource="{Binding RecentPlayedFolders}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#E3F2FD" BorderBrush="#90CAF9" BorderThickness="1"
+                                        CornerRadius="3" Margin="2" Padding="6,2">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   Cursor="Hand"
+                                                   Foreground="#1565C0"
+                                                   VerticalAlignment="Center"
+                                                   Tag="{Binding FullPath}"
+                                                   MouseLeftButtonUp="RecentFolder_Click"
+                                                   ToolTip="{Binding FullPath}"/>
+                                        <Button Content="&#10005;"
+                                                Width="16" Height="16"
+                                                FontSize="9"
+                                                Padding="0"
+                                                Margin="6,0,0,0"
+                                                BorderThickness="0"
+                                                Background="Transparent"
+                                                Foreground="#777777"
+                                                Cursor="Hand"
+                                                Tag="{Binding FullPath}"
+                                                Click="RemoveRecentFolder_Click"
+                                                ToolTip="Remove from list"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+
+            <!-- Music Files Grid (with album cover behind) -->
+            <Grid Grid.Row="1" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged">
+            <!-- Album Cover (behind the file list) -->
+            <Image x:Name="AlbumCoverImage"
+                   Source="{Binding AlbumCover}"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   MaxWidth="450" MaxHeight="450"
+                   Margin="40,0,40,0"
+                   IsHitTestVisible="False"
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   SizeChanged="AlbumCoverImage_SizeChanged"/>
+
+            <DataGrid x:Name="MusicFilesGrid"
+                      Background="Transparent"
                       ItemsSource="{Binding MusicFiles}"
                       SelectedItem="{Binding SelectedFile}"
                       AutoGenerateColumns="False"
@@ -133,7 +241,7 @@
                         </Setter>
                         <Style.Triggers>
                             <Trigger Property="AlternationIndex" Value="1">
-                                <Setter Property="Background" Value="#F5F5F5"/>
+                                <Setter Property="Background" Value="#BEF0F0F0"/>
                             </Trigger>
                             <DataTrigger Value="True">
                                 <DataTrigger.Binding>
@@ -157,6 +265,51 @@
                     <DataGridTextColumn Header="Bitrate" Binding="{Binding BitrateFormatted}" Width="80"/>
                     <DataGridTextColumn Header="Genre" Binding="{Binding Genre}" Width="80"/>
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="50"/>
+                    <DataGridTemplateColumn Header="Rating" Width="90" CanUserSort="False">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <controls:StarRating Rating="{Binding Rating, Mode=TwoWay}"
+                                                     EditMode="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}"
+                                                     HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Tags" Width="160" CanUserSort="False">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Grid>
+                                    <TextBlock Text="{Binding Tags}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" Foreground="#777777">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBox Text="{Binding Tags, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                             BorderThickness="0" Background="Transparent"
+                                             VerticalAlignment="Center"
+                                             ToolTip="Comma-separated tags">
+                                        <TextBox.Style>
+                                            <Style TargetType="TextBox">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBox.Style>
+                                    </TextBox>
+                                </Grid>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                 </DataGrid.Columns>
                 <DataGrid.ContextMenu>
                     <ContextMenu x:Name="FileContextMenu" Opened="FileContextMenu_Opened">
@@ -167,9 +320,10 @@
                     </ContextMenu>
                 </DataGrid.ContextMenu>
             </DataGrid>
+            </Grid>
 
             <!-- Audio Player Control -->
-            <Border Grid.Row="1" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10">
+            <Border Grid.Row="2" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="7*"/>

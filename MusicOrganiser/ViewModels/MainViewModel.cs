@@ -1,11 +1,14 @@
 using System;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using MusicOrganiser.Models;
 using MusicOrganiser.Services;
 
@@ -32,9 +35,12 @@ public class MainViewModel : ViewModelBase, IDisposable
     private CancellationTokenSource? _loadingCts;
     private string _artistSummary = string.Empty;
     private bool _isLoadingArtistInfo;
+    private ImageSource? _albumCover;
 
     public FolderTreeViewModel FolderTree { get; }
     public RecentFolders RecentFolders { get; }
+    public RecentPlayedFolders RecentPlayedStore { get; }
+    public ObservableCollection<RecentPlayedFolderItem> RecentPlayedFolders { get; } = new();
     public ObservableCollection<MusicFile> MusicFiles { get; } = new();
 
     public string CurrentFolderPath
@@ -134,6 +140,12 @@ public class MainViewModel : ViewModelBase, IDisposable
         set => SetProperty(ref _isLoadingArtistInfo, value);
     }
 
+    public ImageSource? AlbumCover
+    {
+        get => _albumCover;
+        set => SetProperty(ref _albumCover, value);
+    }
+
     public ICommand PlayPauseCommand { get; }
     public ICommand StopCommand { get; }
     public ICommand PreviousCommand { get; }
@@ -147,6 +159,11 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     public MainViewModel()
     {
+        // Initialize the SQLite cache and start the background refresh worker before any
+        // folder loading kicks off.
+        DatabaseService.Instance.Initialize();
+        LibraryCacheService.Instance.Start();
+
         _metadataService = new MusicMetadataService();
         _audioPlayer = new AudioPlayerService();
         _fileOperations = new FileOperationsService(_audioPlayer);
@@ -155,6 +172,8 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         FolderTree = new FolderTreeViewModel();
         RecentFolders = RecentFolders.Load();
+        RecentPlayedStore = Models.RecentPlayedFolders.Load();
+        RefreshRecentPlayedFolders();
 
         // Restore volume from settings
         _audioPlayer.Volume = _appSettings.Volume / 100f;
@@ -168,6 +187,29 @@ public class MainViewModel : ViewModelBase, IDisposable
         NextCommand = new RelayCommand(Next);
         PlayFileCommand = new RelayCommand(PlayFile);
         RefreshArtistInfoCommand = new RelayCommand(RefreshArtistInfo);
+    }
+
+    private void AddRecentPlayedFolder(string? folderPath)
+    {
+        if (string.IsNullOrWhiteSpace(folderPath)) return;
+        RecentPlayedStore.Add(folderPath);
+        RefreshRecentPlayedFolders();
+    }
+
+    public void RemoveRecentPlayedFolder(string folderPath)
+    {
+        RecentPlayedStore.Remove(folderPath);
+        RefreshRecentPlayedFolders();
+    }
+
+    private void RefreshRecentPlayedFolders()
+    {
+        RecentPlayedFolders.Clear();
+        foreach (var path in RecentPlayedStore.Folders)
+        {
+            if (!Directory.Exists(path)) continue;
+            RecentPlayedFolders.Add(new RecentPlayedFolderItem(path));
+        }
     }
 
     private void RefreshArtistInfo()
@@ -187,31 +229,138 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         CurrentFolderPath = path;
         MusicFiles.Clear();
+        AlbumCover = null;
 
         _ = LoadFolderAsync(path, token);
+        _ = LoadAlbumCoverAsync(path, token);
+    }
+
+    private async Task LoadAlbumCoverAsync(string path, CancellationToken token)
+    {
+        var bytes = await Task.Run(() => _metadataService.GetAlbumArt(path), token);
+        if (token.IsCancellationRequested || bytes == null)
+            return;
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            if (token.IsCancellationRequested)
+                return;
+
+            try
+            {
+                var img = new BitmapImage();
+                using var ms = new MemoryStream(bytes);
+                img.BeginInit();
+                img.CacheOption = BitmapCacheOption.OnLoad;
+                img.StreamSource = ms;
+                img.EndInit();
+                img.Freeze();
+                AlbumCover = img;
+            }
+            catch
+            {
+                AlbumCover = null;
+            }
+        });
     }
 
     private async Task LoadFolderAsync(string path, CancellationToken token)
     {
-        await Task.Run(() =>
+        // 1. Cache-first: show whatever the SQLite cache already has, instantly.
+        IReadOnlyList<MusicFile> cached;
+        try { cached = LibraryCacheService.Instance.GetCachedFiles(path); }
+        catch { cached = Array.Empty<MusicFile>(); }
+
+        if (cached.Count > 0 && !token.IsCancellationRequested)
         {
-            foreach (var file in _metadataService.GetMusicFiles(path))
+            Application.Current?.Dispatcher.Invoke(() =>
             {
                 if (token.IsCancellationRequested) return;
-
-                Application.Current?.Dispatcher.Invoke(() =>
+                foreach (var file in cached)
                 {
-                    if (!token.IsCancellationRequested)
-                    {
-                        MusicFiles.Add(file);
-                        if (MusicFiles.Count == 1)
-                        {
-                            SelectedFile = file;
-                        }
-                    }
-                });
+                    HookFile(file);
+                    MusicFiles.Add(file);
+                    if (MusicFiles.Count == 1)
+                        SelectedFile = file;
+                }
+            });
+        }
+
+        // 2. Authoritative refresh: diff the filesystem, re-parse only changed files.
+        IReadOnlyList<MusicFile> fresh;
+        try { fresh = await LibraryCacheService.Instance.RefreshFolderFilesAsync(path, token); }
+        catch (OperationCanceledException) { return; }
+        catch { return; }
+
+        if (token.IsCancellationRequested) return;
+
+        // 3. Reconcile the grid against the fresh, authoritative list.
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            if (token.IsCancellationRequested) return;
+            ReconcileMusicFiles(fresh);
+        });
+    }
+
+    private void ReconcileMusicFiles(IReadOnlyList<MusicFile> fresh)
+    {
+        var freshByPath = new Dictionary<string, MusicFile>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in fresh)
+            freshByPath[f.FullPath] = f;
+
+        // Remove entries no longer present on disk.
+        for (int i = MusicFiles.Count - 1; i >= 0; i--)
+        {
+            if (!freshByPath.ContainsKey(MusicFiles[i].FullPath))
+                MusicFiles.RemoveAt(i);
+        }
+
+        // Index remaining entries by path.
+        var indexByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < MusicFiles.Count; i++)
+            indexByPath[MusicFiles[i].FullPath] = i;
+
+        // Add new entries and replace changed ones (different instance = re-parsed metadata).
+        foreach (var f in fresh)
+        {
+            if (indexByPath.TryGetValue(f.FullPath, out var idx))
+            {
+                if (!ReferenceEquals(MusicFiles[idx], f))
+                {
+                    HookFile(f);
+                    MusicFiles[idx] = f;
+                }
             }
-        }, token);
+            else
+            {
+                HookFile(f);
+                indexByPath[f.FullPath] = MusicFiles.Count;
+                MusicFiles.Add(f);
+            }
+        }
+
+        if (SelectedFile == null && MusicFiles.Count > 0)
+            SelectedFile = MusicFiles[0];
+    }
+
+    // Persist rating/tag edits made on a track back to the SQLite cache.
+    private void HookFile(MusicFile file)
+    {
+        file.PropertyChanged -= File_PropertyChanged;
+        file.PropertyChanged += File_PropertyChanged;
+    }
+
+    private void File_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is not MusicFile f) return;
+        try
+        {
+            if (e.PropertyName == nameof(MusicFile.Rating))
+                DatabaseService.Instance.SetFileRating(f.FullPath, f.Rating);
+            else if (e.PropertyName == nameof(MusicFile.Tags))
+                DatabaseService.Instance.SetFileTags(f.FullPath, f.Tags);
+        }
+        catch { }
     }
 
     public void PlayFile(object? parameter)
@@ -225,6 +374,8 @@ public class MainViewModel : ViewModelBase, IDisposable
             NowPlaying = file;
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
+
+            AddRecentPlayedFolder(Path.GetDirectoryName(file.FullPath));
 
             // Only load artist info from cache (don't fetch from API automatically)
             LoadArtistInfoFromCache(file);
@@ -384,5 +535,18 @@ public class MainViewModel : ViewModelBase, IDisposable
         _audioPlayer.PositionChanged -= OnPositionChanged;
         _audioPlayer.PlaybackStopped -= OnPlaybackStopped;
         _audioPlayer.Dispose();
+        LibraryCacheService.Instance.Stop();
+    }
+}
+
+public class RecentPlayedFolderItem
+{
+    public string FullPath { get; }
+    public string DisplayName { get; }
+
+    public RecentPlayedFolderItem(string fullPath)
+    {
+        FullPath = fullPath;
+        DisplayName = RecentPlayedFolders.GetTwoLevelDisplay(fullPath);
     }
 }

@@ -15,6 +15,19 @@ A Windows desktop application for managing and playing music files, built with C
 - Displays metadata: file name, title, artist, album, duration, bitrate, genre, year
 - Highlights currently playing track
 - Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A
+- Album cover displayed behind the file grid
+
+### Ratings & Tags
+- 1–5 star rating for both tracks and folders
+- Free-form comma-separated tags for both tracks and folders
+- Filled stars and existing tags show inline; hover a row to reveal the editable stars/tag box
+- Ratings and tags are stored in the local cache and survive folder rescans
+
+### Local Cache (SQLite)
+- Files and folders are cached in a local SQLite database (WAL mode) at `%APPDATA%\MusicOrganiser\cache.db`
+- First visit reads the filesystem and tags; later visits serve instantly from the cache
+- Cache-first display with an in-app background refresh that re-scans and live-updates the grid/tree when files change on disk
+- Unchanged files are served from cache without re-parsing tags
 
 ### Audio Player
 - Play/Pause/Stop controls
@@ -105,10 +118,11 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
 
 ```
 MusicOrganiser/
-├── Models/           # Data models
-├── Services/         # Audio player, file operations, metadata
+├── Models/           # Data models (MusicFile, FolderRecord, caches, settings)
+├── Services/         # Audio player, file operations, metadata, SQLite cache
 ├── ViewModels/       # MVVM view models
 ├── Converters/       # WPF value converters
+├── Controls/         # Reusable controls (StarRating)
 ├── MainWindow.xaml   # Main UI
 └── App.xaml          # Application entry
 ```
@@ -117,6 +131,7 @@ MusicOrganiser/
 
 - [NAudio](https://github.com/naudio/NAudio) - Audio playback
 - [TagLibSharp](https://github.com/mono/taglib-sharp) - Audio metadata reading
+- [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite/) - Local SQLite cache for files and folders
 - [Anthropic.SDK](https://github.com/tghamm/Anthropic.SDK) - Claude AI integration for artist summaries
 - [DotNetEnv](https://github.com/tonerdo/dotnet-env) - Environment variable loading from .env files
 

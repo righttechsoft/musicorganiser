@@ -41,7 +41,11 @@ MusicOrganiser/
 
 - **FileOperationsService** (`Services/FileOperationsService.cs`): Handles copy/move/delete for files and folders. Automatically stops the audio player when operating on currently playing files.
 
-- **MusicMetadataService** (`Services/MusicMetadataService.cs`): TagLib#-based metadata reader. Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A.
+- **MusicMetadataService** (`Services/MusicMetadataService.cs`): TagLib#-based metadata reader. Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A. `EnumerateSupportedFiles()` returns music file paths (no tag reading) for the cache layer to diff.
+
+- **DatabaseService** (`Services/DatabaseService.cs`): Singleton (`DatabaseService.Instance`) SQLite cache using `Microsoft.Data.Sqlite` (raw ADO.NET, no ORM). DB at `%APPDATA%\MusicOrganiser\cache.db`, WAL mode, pooled connection per operation. Tables: `folders`, `files`, `tags`, `file_tags`, `folder_tags`. Stores file/folder attributes plus `rating` (1–5) and tags. All operations wrapped in try/catch so a cache failure never crashes the app. User ratings are preserved across rescans (rating excluded from the upsert UPDATE set).
+
+- **LibraryCacheService** (`Services/LibraryCacheService.cs`): Singleton orchestrating cache-first serving + in-app background refresh. `GetCachedFiles()` (instant DB read), `RefreshFolderFilesAsync()` (diff filesystem by size/mtime, re-parse only changed files, upsert, return authoritative list). Background worker (`Channel` + single consumer) services `Enqueue()` to warm neighbouring folder caches off the UI thread.
 
 - **ArtistInfoService** (`Services/ArtistInfoService.cs`): Uses Claude Haiku 4.5 API with web search to generate artist summaries. Features:
   - Web search integration (`web_search_20250305` tool) for real-time artist lookup
@@ -72,10 +76,15 @@ MusicOrganiser/
 
 7. **Right-Click Context Menus**: Use `MouseRightButtonDown` (bubbling event) with `e.Handled = true` to correctly identify the clicked item. Do not overwrite the clicked item reference in menu opened handlers.
 
+8. **Cache-First Loading**: Folder tree and music grid read from the SQLite cache first (instant), then run a background refresh (`LibraryCacheService.RefreshFolderFilesAsync` / `FolderNode.LoadChildrenAsync`) that diffs the filesystem, upserts the DB, and reconciles the UI (add/remove/replace). Initialized in `MainViewModel` constructor; worker stopped in `Dispose`.
+
+9. **Ratings & Tags**: 1–5 star rating and comma-separated tags for tracks (`MusicFile`, `INotifyPropertyChanged`) and folders (`FolderNode`). UI via the reusable `Controls/StarRating` control + an inline tags box; both reveal on row hover (`StarRating.EditMode` / visibility triggers bound to row `IsMouseOver`). Edits write through to `DatabaseService` (`SetFileRating`/`SetFileTags`, `SetFolderRating`/`SetFolderTags`). Folder edits self-create the DB row via `EnsureFolderRow`; `FolderNode` guards write-back during cache load with `ApplyCache`/`EnablePersist`.
+
 ## Dependencies
 
 - **NAudio** (2.2.1): Audio playback and volume control
 - **TagLibSharp** (2.3.0): Audio metadata reading
+- **Microsoft.Data.Sqlite** (8.0.10): Local SQLite cache for files and folders
 - **Anthropic.SDK** (5.9.0): Claude AI API client for artist summaries
 - **DotNetEnv** (3.1.1): Environment variable loading from .env files
 
