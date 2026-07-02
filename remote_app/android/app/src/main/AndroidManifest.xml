@@ -2,7 +2,7 @@
     <!-- LAN control app: talks plain HTTP to a desktop on the local network. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="Organiser Remote"
+        android:label="Music Organiser"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
