@@ -33,10 +33,13 @@ platform :ios do
 
     # Flutter drives the archive/export; ExportOptions.plist points each target at its
     # "match AppStore <bundle id>" profile. Build number = the CI run number (monotonic).
+    # Use an ABSOLUTE plist path — flutter runs xcodebuild from inside ios/, so a relative
+    # path would be resolved as ios/ios/ExportOptions.plist and not found.
     build_number = ENV["BUILD_NUMBER"] || "1"
+    export_opts = File.expand_path("ExportOptions.plist", Dir.pwd)
     sh("cd .. && flutter build ipa --release " \
        "--build-number=#{build_number} " \
-       "--export-options-plist=ios/ExportOptions.plist")
+       "--export-options-plist='#{export_opts}'")
 
     ipa = Dir["../build/ios/ipa/*.ipa"].first
     UI.user_error!("No IPA produced") if ipa.nil?
