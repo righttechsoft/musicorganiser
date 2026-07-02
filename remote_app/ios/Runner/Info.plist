@@ -4,6 +4,11 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- App uses only standard/exempt encryption (plain LAN HTTP) — auto-answers the
+	     TestFlight/App Store export-compliance question so builds don't sit in "Missing
+	     Compliance". -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- Allow plain-HTTP to the desktop on the local network (LAN control app). -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
