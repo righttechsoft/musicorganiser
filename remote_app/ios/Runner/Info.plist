@@ -19,6 +19,10 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to your Music Organiser desktop on the local network.</string>
+	<!-- Required by the audio playback library (AVAudioSession references the mic API).
+	     The app never records; the microphone is not used. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Music Organiser does not record audio. This permission is only present because the audio playback engine references the microphone API.</string>
 	<!-- Keep streaming audio playing when the app is backgrounded / screen locked. -->
 	<key>UIBackgroundModes</key>
 	<array>
