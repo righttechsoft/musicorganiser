@@ -13,6 +13,10 @@ public class AppSettings
 
     public int Volume { get; set; } = 100;
 
+    // CoreAudio device id for playback output; null = system default endpoint.
+    // Master (system) volume is intentionally not persisted — it is a live OS value.
+    public string? OutputDeviceId { get; set; }
+
     public void Save()
     {
         try

@@ -25,18 +25,21 @@ class NowPlaying {
 
 class PlayerStatus {
   final NowPlaying? nowPlaying;
-  final int positionSec, durationSec, volume;
+  final int positionSec, durationSec, volume, systemVolume;
   final bool isPlaying, isPaused, shuffle;
   final String repeat; // off | all | one
+  final String? outputDeviceId;
   PlayerStatus({
     this.nowPlaying,
     required this.positionSec,
     required this.durationSec,
     required this.volume,
+    required this.systemVolume,
     required this.isPlaying,
     required this.isPaused,
     required this.shuffle,
     required this.repeat,
+    this.outputDeviceId,
   });
   factory PlayerStatus.fromJson(Map<String, dynamic> j) => PlayerStatus(
         nowPlaying: j['nowPlaying'] == null
@@ -45,19 +48,29 @@ class PlayerStatus {
         positionSec: _int(j['positionSec']),
         durationSec: _int(j['durationSec']),
         volume: _int(j['volume']),
+        systemVolume: _int(j['systemVolume']),
         isPlaying: _bool(j['isPlaying']),
         isPaused: _bool(j['isPaused']),
         shuffle: _bool(j['shuffle']),
         repeat: _str(j['repeat']).isEmpty ? 'off' : _str(j['repeat']),
+        outputDeviceId: j['outputDeviceId'] == null ? null : _str(j['outputDeviceId']),
       );
   static PlayerStatus empty() => PlayerStatus(
       positionSec: 0,
       durationSec: 0,
       volume: 50,
+      systemVolume: 50,
       isPlaying: false,
       isPaused: false,
       shuffle: false,
       repeat: 'off');
+}
+
+class AudioDevice {
+  final String id, name;
+  AudioDevice({required this.id, required this.name});
+  factory AudioDevice.fromJson(Map<String, dynamic> j) =>
+      AudioDevice(id: _str(j['id']), name: _str(j['name']));
 }
 
 class TrackFile {

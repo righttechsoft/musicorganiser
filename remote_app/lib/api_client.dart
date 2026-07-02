@@ -43,6 +43,10 @@ class ApiClient {
 
   String artUrl(String path) => _u('/file/art', {'path': path}).toString();
 
+  // Transcoded AAC stream for local phone playback ("This device").
+  String streamUrl(String path, int bitrate) =>
+      _u('/file/audio', {'path': path, 'bitrate': '$bitrate'}).toString();
+
   Future<bool> ping() async {
     // Generous: the first request on a cold app/network can be slow; a short timeout
     // makes auto-connect on launch flaky.
@@ -58,6 +62,17 @@ class ApiClient {
   Future<void> playback(String action) => http.post(_u('/playback/$action'));
   Future<void> seek(int sec) => _post('/playback/seek', {'positionSec': sec});
   Future<void> setVolume(int level) => _post('/volume', {'level': level});
+  Future<void> setSystemVolume(int level) => _post('/system-volume', {'level': level});
+
+  // ---- output device ----
+  Future<List<AudioDevice>> devices() async {
+    final r = await http.get(_u('/devices')).timeout(const Duration(seconds: 6));
+    return (jsonDecode(r.body) as List)
+        .map((e) => AudioDevice.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> setDevice(String id) => _post('/device', {'id': id});
 
   // ---- files / folders ----
   Future<void> loadFolder(String path) => _post('/folder', {'path': path});

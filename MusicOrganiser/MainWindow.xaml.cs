@@ -299,6 +299,40 @@ public partial class MainWindow : Window
         ViewModel.Volume = (int)(percentage * 100);
     }
 
+    private bool _draggingSystemVolume;
+
+    private void SystemVolumeBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is System.Windows.Controls.ProgressBar progressBar)
+        {
+            _draggingSystemVolume = true;
+            progressBar.CaptureMouse();
+            SetSystemVolumeFromMouse(progressBar, e.GetPosition(progressBar));
+        }
+    }
+
+    private void SystemVolumeBar_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_draggingSystemVolume && sender is System.Windows.Controls.ProgressBar progressBar)
+            SetSystemVolumeFromMouse(progressBar, e.GetPosition(progressBar));
+    }
+
+    private void SystemVolumeBar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is System.Windows.Controls.ProgressBar progressBar)
+        {
+            _draggingSystemVolume = false;
+            progressBar.ReleaseMouseCapture();
+        }
+    }
+
+    private void SetSystemVolumeFromMouse(System.Windows.Controls.ProgressBar bar, Point pos)
+    {
+        if (bar.ActualWidth <= 0) return;
+        var percentage = Math.Max(0, Math.Min(1, pos.X / bar.ActualWidth));
+        ViewModel.SystemVolume = (int)(percentage * 100);
+    }
+
     #region Folder Context Menu
 
     private void FolderContextMenu_Opened(object sender, RoutedEventArgs e)

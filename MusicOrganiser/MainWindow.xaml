@@ -464,7 +464,7 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
 
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left">
                                 <Button Command="{Binding ToggleShuffleCommand}" ToolTip="Shuffle" Content="&#x1F500;">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
@@ -515,15 +515,44 @@
                                 </Button>
                             </StackPanel>
 
-                            <!-- Volume Control -->
+                            <!-- Remote playback indicator (audio streaming to the phone) -->
+                            <Border Grid.Column="1" Background="#1E88E5" CornerRadius="4"
+                                    Padding="8,3" Margin="10,0" VerticalAlignment="Center"
+                                    Visibility="{Binding RemoteSink, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="&#x1F4F1; Remote playback" Foreground="White"
+                                           FontWeight="SemiBold" FontSize="12"/>
+                            </Border>
+
+                            <!-- Output Device + Volume Controls -->
                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <!-- Output device selector -->
+                                <ComboBox x:Name="OutputDeviceBox"
+                                          Width="150" Height="22"
+                                          VerticalAlignment="Center" Margin="0,0,10,0"
+                                          ItemsSource="{Binding OutputDevices}"
+                                          SelectedItem="{Binding SelectedOutputDevice, Mode=TwoWay}"
+                                          DisplayMemberPath="Name"
+                                          ToolTip="Output device"/>
+                                <!-- System (Windows master) volume -->
+                                <TextBlock Text="&#x1F310;" FontSize="16" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <ProgressBar x:Name="SystemVolumeBar"
+                                             Width="80" Height="20"
+                                             Minimum="0" Maximum="100"
+                                             Value="{Binding SystemVolume, Mode=OneWay}"
+                                             Cursor="Hand"
+                                             ToolTip="System volume (whole PC)"
+                                             Margin="0,0,15,0"
+                                             MouseLeftButtonDown="SystemVolumeBar_MouseLeftButtonDown"
+                                             MouseMove="SystemVolumeBar_MouseMove"
+                                             MouseLeftButtonUp="SystemVolumeBar_MouseLeftButtonUp"/>
+                                <!-- In-app volume -->
                                 <TextBlock Text="&#128266;" FontSize="16" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <ProgressBar x:Name="VolumeBar"
                                              Width="80" Height="20"
                                              Minimum="0" Maximum="100"
                                              Value="{Binding Volume, Mode=OneWay}"
                                              Cursor="Hand"
-                                             ToolTip="Volume"
+                                             ToolTip="App volume"
                                              MouseLeftButtonDown="VolumeBar_MouseLeftButtonDown"
                                              MouseMove="VolumeBar_MouseMove"
                                              MouseLeftButtonUp="VolumeBar_MouseLeftButtonUp"/>

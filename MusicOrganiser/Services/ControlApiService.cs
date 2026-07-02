@@ -27,6 +27,9 @@ public class ControlApiService : IDisposable
     // ponytail: hardcoded port; read from AppSettings if it ever needs to be configurable.
     private const int DefaultPort = 8787;
 
+    // Sentinel output-device id meaning "play on the phone" (the remote streams audio).
+    private const string ThisDeviceId = "__this_device__";
+
     private readonly MainViewModel _vm;
     private readonly int _port;
     private readonly HttpListener _listener = new();
@@ -43,6 +46,7 @@ public class ControlApiService : IDisposable
     {
         try
         {
+            AudioStreamService.ClearCache(); // fresh transcode cache each run
             _listener.Prefixes.Add($"http://+:{_port}/");
             _listener.Start();
             _ = AcceptLoopAsync();
@@ -146,6 +150,42 @@ public class ControlApiService : IDisposable
                 break;
             }
 
+            // ---- System (Windows master) volume ----
+            case ("POST", "/system-volume"):
+            {
+                var body = await ReadBody(req);
+                var level = GetNum(body, "level");
+                if (level == null) { await WriteError(ctx, "level required", 400); break; }
+                OnUi(() => _vm.SystemVolume = level.Value);
+                await WriteJson(ctx, new { ok = true });
+                break;
+            }
+
+            // ---- Output device selection ----
+            case ("GET", "/devices"):
+                await WriteJson(ctx, OnUi(() => (object)_vm.OutputDevices
+                    .Select(d => new { id = d.Id, name = d.Name }).ToList()));
+                break;
+            case ("POST", "/device"):
+            {
+                var body = await ReadBody(req);
+                var id = GetStr(body, "id"); // null/empty = revert to system default
+                if (id == ThisDeviceId)
+                {
+                    OnUi(() => _vm.RemoteSink = true); // phone becomes the audio sink
+                }
+                else
+                {
+                    OnUi(() =>
+                    {
+                        _vm.RemoteSink = false;
+                        _vm.SelectedOutputDevice = _vm.OutputDevices.FirstOrDefault(d => d.Id == id);
+                    });
+                }
+                await WriteJson(ctx, new { ok = true });
+                break;
+            }
+
             // ---- Files / browse ----
             case ("GET", "/browse"):
                 await WriteJson(ctx, await BrowseAsync(req.QueryString["path"], req.QueryString["open"] == "1"));
@@ -192,6 +232,9 @@ public class ControlApiService : IDisposable
             }
             case ("GET", "/file/art"):
                 await ServeArtAsync(ctx, req.QueryString["path"]);
+                break;
+            case ("GET", "/file/audio"):
+                await ServeAudioAsync(ctx, req.QueryString["path"], req.QueryString["bitrate"]);
                 break;
             case ("POST", "/file/rating"):
             {
@@ -414,6 +457,8 @@ public class ControlApiService : IDisposable
                 isPlaying = _vm.IsPlaying,
                 isPaused = _vm.AudioPlayer.IsPaused,
                 volume = (int)_vm.Volume,
+                systemVolume = (int)_vm.SystemVolume,
+                outputDeviceId = _vm.RemoteSink ? ThisDeviceId : _vm.SelectedOutputDevice?.Id,
                 shuffle = _vm.ShuffleEnabled,
                 repeat = _vm.Repeat.ToString().ToLowerInvariant(),
             };
@@ -615,6 +660,108 @@ public class ControlApiService : IDisposable
         {
             try { await WriteError(ctx, "no art", 404); } catch { }
         }
+    }
+
+    // ---- Audio stream (transcoded AAC for the phone; supports HTTP Range) ----
+    private async Task ServeAudioAsync(HttpListenerContext ctx, string? path, string? bitrateStr)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            await WriteError(ctx, "not found", 404);
+            return;
+        }
+
+        var bitrate = AudioStreamService.DefaultBitrate;
+        if (int.TryParse(bitrateStr, out var b)) bitrate = b;
+        bitrate = AudioStreamService.ClampBitrate(bitrate);
+        _vm.LastStreamBitrate = bitrate; // so PlayFile prewarms the next track at this rate
+
+        string file;
+        try
+        {
+            file = await Task.Run(() => AudioStreamService.GetOrCreateAac(path, bitrate));
+        }
+        catch
+        {
+            await WriteError(ctx, "transcode failed", 500);
+            return;
+        }
+
+        try
+        {
+            var len = new FileInfo(file).Length;
+            long start = 0, end = len - 1;
+            var rangeHeader = ctx.Request.Headers["Range"];
+            var isRange = !string.IsNullOrEmpty(rangeHeader)
+                          && rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase)
+                          && TryParseRange(rangeHeader, len, out start, out end);
+
+            ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
+            ctx.Response.Headers["Accept-Ranges"] = "bytes";
+            ctx.Response.ContentType = "audio/mp4";
+            if (isRange)
+            {
+                ctx.Response.StatusCode = 206;
+                ctx.Response.Headers["Content-Range"] = $"bytes {start}-{end}/{len}";
+            }
+            else
+            {
+                ctx.Response.StatusCode = 200;
+                start = 0;
+                end = len - 1;
+            }
+
+            var count = end - start + 1;
+            ctx.Response.ContentLength64 = count;
+
+            using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+            fs.Seek(start, SeekOrigin.Begin);
+            var buffer = new byte[81920];
+            var remaining = count;
+            while (remaining > 0)
+            {
+                var toRead = (int)Math.Min(buffer.Length, remaining);
+                var read = await fs.ReadAsync(buffer.AsMemory(0, toRead));
+                if (read <= 0) break;
+                await ctx.Response.OutputStream.WriteAsync(buffer.AsMemory(0, read));
+                remaining -= read;
+            }
+            ctx.Response.Close();
+        }
+        catch
+        {
+            try { ctx.Response.Abort(); } catch { } // client disconnected mid-stream
+        }
+    }
+
+    // Parses a single-range "bytes=start-end" header. Handles open start/end and suffix ranges.
+    private static bool TryParseRange(string header, long len, out long start, out long end)
+    {
+        start = 0;
+        end = len - 1;
+        var spec = header.Substring("bytes=".Length);
+        var dash = spec.IndexOf('-');
+        if (dash < 0) return false;
+        var startStr = spec.Substring(0, dash).Trim();
+        var endStr = spec.Substring(dash + 1).Trim();
+
+        if (startStr.Length == 0)
+        {
+            // suffix range: last N bytes
+            if (!long.TryParse(endStr, out var suffix) || suffix <= 0) return false;
+            if (suffix > len) suffix = len;
+            start = len - suffix;
+            end = len - 1;
+            return true;
+        }
+
+        if (!long.TryParse(startStr, out start)) return false;
+        if (endStr.Length == 0) end = len - 1;
+        else if (!long.TryParse(endStr, out end)) return false;
+
+        if (start < 0 || start >= len) return false;
+        if (end >= len) end = len - 1;
+        return end >= start;
     }
 
     // ---- UI-thread marshalling ----

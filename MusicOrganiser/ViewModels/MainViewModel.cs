@@ -40,6 +40,10 @@ public class MainViewModel : ViewModelBase, IDisposable
     private string _artistSummary = string.Empty;
     private bool _isLoadingArtistInfo;
     private ImageSource? _albumCover;
+    private OutputDeviceItem? _selectedOutputDevice;
+    private bool _remoteSink;
+    // Last bitrate the phone requested; used to prewarm the transcode cache.
+    private int _lastStreamBitrate = AudioStreamService.DefaultBitrate;
 
     public FolderTreeViewModel FolderTree { get; }
     public RecentFolders RecentFolders { get; }
@@ -154,6 +158,58 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
+    // Windows master volume of the active output device (0..100). Not persisted — live OS value.
+    public double SystemVolume
+    {
+        get => _audioPlayer.SystemVolume * 100;
+        set
+        {
+            _audioPlayer.SystemVolume = (float)(value / 100);
+            OnPropertyChanged(nameof(SystemVolume));
+        }
+    }
+
+    public List<OutputDeviceItem> OutputDevices { get; private set; } = new();
+
+    public OutputDeviceItem? SelectedOutputDevice
+    {
+        get => _selectedOutputDevice;
+        set
+        {
+            if (SetProperty(ref _selectedOutputDevice, value))
+            {
+                _audioPlayer.OutputDeviceId = value?.Id;
+                _appSettings.OutputDeviceId = value?.Id;
+                _appSettings.Save();
+                OnPropertyChanged(nameof(SystemVolume)); // master volume is per-device
+            }
+        }
+    }
+
+    // When true, the phone is the audio sink: desktop output is muted and tracks are
+    // transcoded/streamed to the phone. Session-only (not persisted).
+    public bool RemoteSink
+    {
+        get => _remoteSink;
+        set
+        {
+            if (SetProperty(ref _remoteSink, value))
+            {
+                _audioPlayer.LocalMuted = value;
+                if (value && NowPlaying != null)
+                    AudioStreamService.Prewarm(NowPlaying.FullPath, _lastStreamBitrate);
+            }
+        }
+    }
+
+    // Set by the control API when the phone requests a stream, so PlayFile can prewarm
+    // the next track at the same bitrate.
+    public int LastStreamBitrate
+    {
+        get => _lastStreamBitrate;
+        set => _lastStreamBitrate = AudioStreamService.ClampBitrate(value);
+    }
+
     public double SliderValue
     {
         get => _sliderValue;
@@ -243,6 +299,14 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         // Restore volume from settings
         _audioPlayer.Volume = _appSettings.Volume / 100f;
+
+        // Restore output device selection; populate the device list for the picker.
+        _audioPlayer.OutputDeviceId = _appSettings.OutputDeviceId;
+        OutputDevices = _audioPlayer.GetOutputDevices()
+            .Select(d => new OutputDeviceItem(d.Id, d.Name)).ToList();
+        // Show the actual current device by default (saved one, else the system default).
+        var currentDeviceId = _audioPlayer.OutputDeviceId ?? _audioPlayer.GetDefaultDeviceId();
+        _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentDeviceId);
 
         _audioPlayer.PositionChanged += OnPositionChanged;
         _audioPlayer.PlaybackStopped += OnPlaybackStopped;
@@ -567,6 +631,10 @@ public class MainViewModel : ViewModelBase, IDisposable
             NowPlaying = file;
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
+
+            // Phone is the sink: warm the transcode cache so its stream request is ready.
+            if (_remoteSink)
+                AudioStreamService.Prewarm(file.FullPath, _lastStreamBitrate);
 
             AddRecentPlayedFolder(Path.GetDirectoryName(file.FullPath));
             PersistPlaylistState();   // remember this as the playlist's last track

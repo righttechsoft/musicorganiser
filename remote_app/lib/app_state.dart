@@ -1,12 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'models.dart';
 import 'watch_link.dart';
 
 enum ConnState { disconnected, connecting, connected, lost }
+
+// Sentinel device id meaning "play on this phone" (stream from the desktop).
+const String kThisDevice = '__this_device__';
+// Manual stream-quality tiers (AAC bitrate). MediaFoundation AAC caps at 192k.
+const Map<String, int> kQualities = {'Low': 96000, 'Med': 160000, 'High': 192000};
 
 class RecentConn {
   final String host;
@@ -31,6 +37,13 @@ class AppState extends ChangeNotifier {
 
   List<TrackFile> files = [];
   final Map<String, TrackFile> _byPath = {};
+
+  // Local playback ("This device"): the phone streams + plays audio itself and follows
+  // the desktop's /status. Session-only; bitrate is a persisted preference.
+  final AudioPlayer _player = AudioPlayer();
+  bool localOutput = false;
+  int streamBitrate = 160000;
+  double localVolume = 100; // phone player volume (0..100) while in local output
 
   // Set by History to ask the Library screen to navigate to a folder; consumed there.
   String? pendingLibraryPath;
@@ -66,6 +79,7 @@ class AppState extends ChangeNotifier {
         .map((s) => RecentConn.fromJson(jsonDecode(s) as Map<String, dynamic>))
         .toList()
       ..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
+    streamBitrate = sp.getInt('streamBitrate') ?? 160000;
     notifyListeners();
   }
 
@@ -135,7 +149,79 @@ class AppState extends ChangeNotifier {
     api = null;
     files = [];
     _byPath.clear();
+    unawaited(_player.stop());
+    localOutput = false; // session-only: next connect defaults to desktop output
     notifyListeners();
+  }
+
+  // ---- Local playback ("This device") ----
+
+  Future<void> enableLocalOutput() async {
+    if (api == null) return;
+    localOutput = true;
+    notifyListeners();
+    await api!.setDevice(kThisDevice); // desktop mutes + reports the sentinel
+    await _syncLocal(force: true);
+  }
+
+  Future<void> selectDesktopDevice(String id) async {
+    localOutput = false;
+    await _player.stop();
+    notifyListeners();
+    if (api != null) await api!.setDevice(id);
+  }
+
+  Future<void> setQuality(int bitrate) async {
+    streamBitrate = bitrate;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setInt('streamBitrate', bitrate);
+    notifyListeners();
+    if (!localOutput || api == null) return;
+    final np = status.nowPlaying;
+    if (np == null) return;
+    final pos = _player.position;
+    try {
+      await _player.setUrl(api!.streamUrl(np.path, bitrate));
+      await _player.seek(pos);
+      if (status.isPlaying && !status.isPaused) _player.play();
+    } catch (_) {/* buffering; next tick retries */}
+  }
+
+  // Slaves the local player to the desktop's /status: load on track change, mirror
+  // play/pause, resync the playhead on drift.
+  Future<void> _syncLocal({bool force = false}) async {
+    if (!localOutput || api == null) return;
+    final np = status.nowPlaying;
+    if (np == null) {
+      if (_player.playing) await _player.stop();
+      return;
+    }
+    try {
+      if (force) {
+        await _player.setUrl(api!.streamUrl(np.path, streamBitrate));
+      }
+      final shouldPlay = status.isPlaying && !status.isPaused;
+      if (shouldPlay && !_player.playing) {
+        _player.play();
+      } else if (!shouldPlay && _player.playing) {
+        _player.pause();
+      }
+      final drift = (_player.position.inSeconds - status.positionSec).abs();
+      if (drift > 2) await _player.seek(Duration(seconds: status.positionSec));
+    } catch (_) {/* buffering/offline; next tick retries */}
+  }
+
+  Future<void> setLocalVolume(double v) async {
+    localVolume = v.clamp(0, 100);
+    await _player.setVolume(localVolume / 100);
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    _player.dispose();
+    super.dispose();
   }
 
   void _startPolling() {
@@ -153,6 +239,7 @@ class AppState extends ChangeNotifier {
       if (conn == ConnState.lost) conn = ConnState.connected;
       notifyListeners();
       if (trackChanged) unawaited(loadFiles());
+      unawaited(_syncLocal(force: trackChanged));
     } catch (_) {
       if (conn == ConnState.connected) {
         conn = ConnState.lost;

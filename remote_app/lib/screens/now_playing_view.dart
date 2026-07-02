@@ -18,8 +18,73 @@ class NowPlayingView extends StatefulWidget {
 class _NowPlayingViewState extends State<NowPlayingView> {
   double? _seekDrag; // non-null while dragging the seek bar
   double? _volDrag;
+  double? _sysVolDrag; // non-null while dragging the system-volume bar
+  List<AudioDevice> _devices = [];
 
   AppState get app => widget.app;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDevices();
+  }
+
+  Future<void> _loadDevices() async {
+    final api = app.api;
+    if (api == null) return;
+    try {
+      final d = await api.devices();
+      if (mounted) setState(() => _devices = d);
+    } catch (_) {/* offline / not connected yet */}
+  }
+
+  String _deviceName(String? id) {
+    if (app.localOutput) return 'This device';
+    if (id == null || id.isEmpty) return 'System default';
+    for (final d in _devices) {
+      if (d.id == id) return d.name;
+    }
+    return 'Selected device';
+  }
+
+  Future<void> _pickDevice() async {
+    final api = app.api;
+    if (api == null) return;
+    // Refresh the list so plugged/unplugged devices show up.
+    try {
+      final d = await api.devices();
+      if (mounted) setState(() => _devices = d);
+    } catch (_) {}
+    if (!mounted) return;
+    final current = app.localOutput ? kThisDevice : app.status.outputDeviceId;
+    // "This device" (phone playback) sits at the top, above the desktop's devices.
+    final options = [AudioDevice(id: kThisDevice, name: 'This device'), ..._devices];
+    final chosen = await showModalBottomSheet<AudioDevice>(
+      context: context,
+      backgroundColor: AppColors.bg,
+      builder: (c) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final d in options)
+              ListTile(
+                leading: Icon(
+                    d.id == current ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                    color: d.id == current ? AppColors.accent : AppColors.muted),
+                title: Text(d.name, style: AppText.trackTitle),
+                onTap: () => Navigator.pop(c, d),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null) return;
+    if (chosen.id == kThisDevice) {
+      await app.enableLocalOutput();
+    } else {
+      await app.selectDesktopDevice(chosen.id);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -100,7 +165,8 @@ class _NowPlayingViewState extends State<NowPlayingView> {
     final rating = track?.rating ?? 0;
     final pos = _seekDrag ?? s.positionSec.toDouble();
     final dur = s.durationSec.toDouble();
-    final vol = _volDrag ?? s.volume.toDouble();
+    final vol = _volDrag ?? (app.localOutput ? app.localVolume : s.volume.toDouble());
+    final sysVol = _sysVolDrag ?? s.systemVolume.toDouble();
     return [
       Text(np.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: AppText.screenTitle),
       const SizedBox(height: 4),
@@ -173,7 +239,11 @@ class _NowPlayingViewState extends State<NowPlayingView> {
                 max: 100,
                 onChanged: (v) => setState(() => _volDrag = v),
                 onChangeEnd: (v) async {
-                  await app.api!.setVolume(v.round());
+                  if (app.localOutput) {
+                    await app.setLocalVolume(v);
+                  } else {
+                    await app.api!.setVolume(v.round());
+                  }
                   setState(() => _volDrag = null);
                 },
               ),
@@ -182,7 +252,87 @@ class _NowPlayingViewState extends State<NowPlayingView> {
           SizedBox(width: 30, child: Text('${vol.round()}', textAlign: TextAlign.right, style: AppText.mono)),
         ],
       ),
+      // System (Windows master) volume — desktop PC only; hidden while streaming to phone.
+      if (!app.localOutput) ...[
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Icon(Icons.computer, size: 20, color: AppColors.muted),
+            Expanded(
+              child: SliderTheme(
+                data: _sliderTheme(),
+                child: Slider(
+                  value: sysVol.clamp(0, 100),
+                  max: 100,
+                  onChanged: (v) => setState(() => _sysVolDrag = v),
+                  onChangeEnd: (v) async {
+                    await app.api!.setSystemVolume(v.round());
+                    setState(() => _sysVolDrag = null);
+                  },
+                ),
+              ),
+            ),
+            SizedBox(width: 30, child: Text('${sysVol.round()}', textAlign: TextAlign.right, style: AppText.mono)),
+          ],
+        ),
+      ],
+      const SizedBox(height: 8),
+      // Output device selector.
+      InkWell(
+        onTap: _pickDevice,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(
+            children: [
+              const Icon(Icons.speaker_group_outlined, size: 20, color: AppColors.muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(_deviceName(s.outputDeviceId),
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.mono),
+              ),
+              const Icon(Icons.arrow_drop_down, color: AppColors.muted),
+            ],
+          ),
+        ),
+      ),
+      // Stream quality (only relevant when the phone is the sink).
+      if (app.localOutput) ...[
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Icon(Icons.high_quality_outlined, size: 20, color: AppColors.muted),
+            const SizedBox(width: 8),
+            for (final entry in kQualities.entries)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _qualityChip(entry.key, entry.value),
+              ),
+          ],
+        ),
+      ],
     ];
+  }
+
+  Widget _qualityChip(String label, int bitrate) {
+    final active = app.streamBitrate == bitrate;
+    return InkWell(
+      onTap: () => app.setQuality(bitrate),
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: active ? AppColors.accentTint : AppColors.bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: active ? AppColors.accent : AppColors.line),
+        ),
+        child: Text(label,
+            style: AppText.trackTitle.copyWith(
+                fontSize: 13,
+                color: active ? AppColors.accent : AppColors.muted,
+                fontWeight: FontWeight.w600)),
+      ),
+    );
   }
 
   Widget _transport(PlayerStatus s) {
