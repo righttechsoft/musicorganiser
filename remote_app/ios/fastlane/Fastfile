@@ -17,12 +17,13 @@ platform :ios do
     )
 
     # CI: create a throwaway keychain for the signing identity match installs.
-    # NOTE: setup_ci force-sets MATCH_READONLY=true, so we pass readonly explicitly below.
     setup_ci
+    # setup_ci force-sets MATCH_READONLY=true; undo it so the first run can CREATE the cert.
+    ENV["MATCH_READONLY"] = "false"
 
     # Sync (or, on the first run, CREATE) the distribution cert + one profile per bundle id,
     # storing them in the certs repo. Bootstrap needs readonly:false so the cert is created;
-    # once it exists you can flip this to true (or gate on the MATCH_READONLY env).
+    # once it exists you can flip this to true.
     match(
       type: "appstore",
       app_identifier: APP_IDS,
