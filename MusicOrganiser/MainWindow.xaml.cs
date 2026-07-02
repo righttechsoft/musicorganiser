@@ -6,6 +6,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using Microsoft.Win32;
 using MusicOrganiser.Dialogs;
 using MusicOrganiser.Models;
@@ -17,6 +18,7 @@ public partial class MainWindow : Window
 {
     private MainViewModel ViewModel => (MainViewModel)DataContext;
     private FolderNode? _rightClickedFolder;
+    private Playlist? _rightClickedPlaylist;
 
     public MainWindow()
     {
@@ -91,10 +93,9 @@ public partial class MainWindow : Window
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MainViewModel.NowPlaying))
-        {
-            MusicFilesGrid.Items.Refresh();
-        }
+        // Now-playing row highlight updates automatically via the NowPlayingConverter
+        // MultiBinding (it watches DataContext.NowPlaying). Do NOT call Items.Refresh()
+        // here: it regenerates every row container and wipes the StarRating cell display.
     }
 
     private void FolderTreeView_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
@@ -137,7 +138,7 @@ public partial class MainWindow : Window
     /// Scrolls the folder tree so the node for <paramref name="path"/> is visible,
     /// realizing virtualized containers along the way.
     /// </summary>
-    private void ScrollTreeToFolder(string path)
+    private void ScrollTreeToFolder(string path, int attempt = 0)
     {
         var node = ViewModel.FolderTree.FindNode(path);
         if (node == null) return;
@@ -161,7 +162,15 @@ public partial class MainWindow : Window
                 parent.UpdateLayout();
                 tvi = parent.ItemContainerGenerator.ContainerFromItem(n) as TreeViewItem;
             }
-            if (tvi == null) return;
+            if (tvi == null)
+            {
+                // Container not realized yet (virtualization). Ancestors expanded above
+                // are now closer to the target, so retry on a later layout pass.
+                if (attempt < 5)
+                    Dispatcher.BeginInvoke(new Action(() => ScrollTreeToFolder(path, attempt + 1)),
+                        System.Windows.Threading.DispatcherPriority.Background);
+                return;
+            }
 
             if (n != node)
             {
@@ -172,7 +181,32 @@ public partial class MainWindow : Window
             parent = tvi;
         }
 
-        tvi?.BringIntoView();
+        if (tvi == null) return;
+        tvi.UpdateLayout();
+
+        var sv = FindScrollViewer(FolderTreeView);
+        if (sv == null)
+        {
+            tvi.BringIntoView();
+            return;
+        }
+
+        // Centre the target row in the viewport.
+        var offset = tvi.TransformToAncestor(sv).Transform(new Point(0, 0)).Y;
+        var rowHeight = tvi.ActualHeight;
+        var target = sv.VerticalOffset + offset - (sv.ViewportHeight - rowHeight) / 2;
+        sv.ScrollToVerticalOffset(Math.Max(0, target));
+    }
+
+    private static ScrollViewer? FindScrollViewer(DependencyObject root)
+    {
+        if (root is ScrollViewer sv) return sv;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var found = FindScrollViewer(VisualTreeHelper.GetChild(root, i));
+            if (found != null) return found;
+        }
+        return null;
     }
 
     private void RemoveRecentFolder_Click(object sender, RoutedEventArgs e)
@@ -191,6 +225,33 @@ public partial class MainWindow : Window
         }
     }
 
+    private void CoverHost_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (AlbumCoverImage.Source == null) return;
+
+        // Let clicks on a data row do normal grid selection; only the bare cover toggles zoom.
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) != null) return;
+
+        var p = e.GetPosition(AlbumCoverImage);
+        if (p.X < 0 || p.Y < 0 || p.X > AlbumCoverImage.ActualWidth || p.Y > AlbumCoverImage.ActualHeight)
+            return;
+
+        CoverZoomOverlay.Visibility = Visibility.Visible;
+    }
+
+    private void CoverZoomOverlay_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        => CoverZoomOverlay.Visibility = Visibility.Collapsed;
+
+    private static T? FindAncestor<T>(DependencyObject? d) where T : DependencyObject
+    {
+        while (d != null)
+        {
+            if (d is T t) return t;
+            d = VisualTreeHelper.GetParent(d);
+        }
+        return null;
+    }
+
     private void ProgressBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is System.Windows.Controls.ProgressBar progressBar && ViewModel.TotalDuration.TotalSeconds > 0)
@@ -202,14 +263,40 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool _draggingVolume;
+
     private void VolumeBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is System.Windows.Controls.ProgressBar progressBar)
         {
-            var clickPosition = e.GetPosition(progressBar);
-            var percentage = clickPosition.X / progressBar.ActualWidth;
-            ViewModel.Volume = (int)(percentage * 100);
+            _draggingVolume = true;
+            progressBar.CaptureMouse();
+            SetVolumeFromMouse(progressBar, e.GetPosition(progressBar));
         }
+    }
+
+    private void VolumeBar_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_draggingVolume && sender is System.Windows.Controls.ProgressBar progressBar)
+            SetVolumeFromMouse(progressBar, e.GetPosition(progressBar));
+    }
+
+    private void VolumeBar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is System.Windows.Controls.ProgressBar progressBar)
+        {
+            _draggingVolume = false;
+            progressBar.ReleaseMouseCapture();
+        }
+    }
+
+    // ponytail: Volume setter writes settings.json each call, so a drag saves per move.
+    // Tiny file; debounce only if it ever shows up as lag.
+    private void SetVolumeFromMouse(System.Windows.Controls.ProgressBar bar, Point pos)
+    {
+        if (bar.ActualWidth <= 0) return;
+        var percentage = Math.Max(0, Math.Min(1, pos.X / bar.ActualWidth));
+        ViewModel.Volume = (int)(percentage * 100);
     }
 
     #region Folder Context Menu
@@ -219,6 +306,11 @@ public partial class MainWindow : Window
         // Don't overwrite _rightClickedFolder - it was set in the right-click handler
         BuildRecentFoldersMenu(FolderCopyToMenu, ViewModel.RecentFolders.CopyFolders, FolderCopyToRecent_Click);
         BuildRecentFoldersMenu(FolderMoveToMenu, ViewModel.RecentFolders.MoveFolders, FolderMoveToRecent_Click);
+        BuildAddToPlaylistMenu(FolderAddToPlaylistMenu, playlist =>
+        {
+            if (_rightClickedFolder != null)
+                _ = ViewModel.AddFolderToPlaylistAsync(playlist.Id, _rightClickedFolder.FullPath);
+        });
     }
 
     private void FolderRefresh_Click(object sender, RoutedEventArgs e)
@@ -364,6 +456,12 @@ public partial class MainWindow : Window
     {
         BuildRecentFoldersMenu(FileCopyToMenu, ViewModel.RecentFolders.CopyFolders, FileCopyToRecent_Click);
         BuildRecentFoldersMenu(FileMoveToMenu, ViewModel.RecentFolders.MoveFolders, FileMoveToRecent_Click);
+        BuildAddToPlaylistMenu(FileAddToPlaylistMenu, playlist =>
+        {
+            var files = GetSelectedFiles();
+            if (files.Count > 0)
+                ViewModel.AddFilesToPlaylist(playlist.Id, files.Select(f => f.FullPath));
+        });
     }
 
     private async void FileCopyBrowse_Click(object sender, RoutedEventArgs e)
@@ -697,6 +795,116 @@ public partial class MainWindow : Window
     private List<MusicFile> GetSelectedFiles()
     {
         return MusicFilesGrid.SelectedItems.Cast<MusicFile>().ToList();
+    }
+
+    #endregion
+
+    #region Playlists
+
+    private void NewPlaylist_Click(object sender, RoutedEventArgs e) => PromptCreatePlaylist();
+
+    private void NewPlaylistFromSelection_Click(object sender, RoutedEventArgs e)
+    {
+        var files = GetSelectedFiles();
+        if (files.Count == 0) return;
+
+        var playlist = PromptCreatePlaylist();
+        if (playlist != null)
+            ViewModel.AddFilesToPlaylist(playlist.Id, files.Select(f => f.FullPath));
+    }
+
+    private void PlaylistListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PlaylistListBox.SelectedItem is Playlist p && p.Id != ViewModel.CurrentPlaylistId)
+            ViewModel.LoadPlaylist(p);
+    }
+
+    private void PlaylistItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is ListBoxItem item)
+            _rightClickedPlaylist = item.DataContext as Playlist;
+    }
+
+    private void PlaylistRename_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedPlaylist == null) return;
+
+        var dialog = new TextInputDialog("Rename Playlist", "Playlist name:", _rightClickedPlaylist.Name)
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() == true)
+            ViewModel.RenamePlaylist(_rightClickedPlaylist, dialog.InputText);
+    }
+
+    private void PlaylistDelete_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedPlaylist == null) return;
+
+        var result = MessageBox.Show(
+            $"Delete playlist '{_rightClickedPlaylist.Name}'?\n\nThe music files themselves are not deleted.",
+            "Confirm Delete",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (result == MessageBoxResult.Yes)
+            ViewModel.DeletePlaylist(_rightClickedPlaylist);
+    }
+
+    private void RemoveFromPlaylist_Click(object sender, RoutedEventArgs e)
+    {
+        var files = GetSelectedFiles();
+        if (files.Count > 0)
+            ViewModel.RemoveFromCurrentPlaylist(files);
+    }
+
+    private void MoveEntryUp_Click(object sender, RoutedEventArgs e)
+        => ViewModel.MoveEntry(ViewModel.SelectedFile, -1);
+
+    private void MoveEntryDown_Click(object sender, RoutedEventArgs e)
+        => ViewModel.MoveEntry(ViewModel.SelectedFile, +1);
+
+    private Playlist? PromptCreatePlaylist()
+    {
+        var dialog = new TextInputDialog("New Playlist", "Playlist name:", "New Playlist")
+        {
+            Owner = this
+        };
+        return dialog.ShowDialog() == true ? ViewModel.CreatePlaylist(dialog.InputText) : null;
+    }
+
+    private void BuildAddToPlaylistMenu(MenuItem parentMenu, Action<Playlist> onPlaylistChosen)
+    {
+        parentMenu.Items.Clear();
+
+        if (ViewModel.Playlists.Count == 0)
+        {
+            parentMenu.Items.Add(new MenuItem { Header = "(no playlists)", IsEnabled = false });
+        }
+        else
+        {
+            foreach (var playlist in ViewModel.Playlists)
+            {
+                var item = new MenuItem { Header = playlist.Name, Tag = playlist };
+                item.Click += (s, _) =>
+                {
+                    if (s is MenuItem mi && mi.Tag is Playlist p)
+                        onPlaylistChosen(p);
+                };
+                parentMenu.Items.Add(item);
+            }
+        }
+
+        parentMenu.Items.Add(new Separator());
+
+        var newItem = new MenuItem { Header = "New Playlist..." };
+        newItem.Click += (_, _) =>
+        {
+            var created = PromptCreatePlaylist();
+            if (created != null)
+                onPlaylistChosen(created);
+        };
+        parentMenu.Items.Add(newItem);
     }
 
     #endregion

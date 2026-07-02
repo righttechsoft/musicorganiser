@@ -1,0 +1,12 @@
+<!--
+  Paste these keys into the WATCH APP target's Info.plist (Info tab → right-click →
+  "Open As → Source Code", add inside the top-level <dict>). Required because the
+  desktop API is plain HTTP on the LAN; watchOS blocks cleartext by default.
+-->
+<key>NSAppTransportSecurity</key>
+<dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+</dict>

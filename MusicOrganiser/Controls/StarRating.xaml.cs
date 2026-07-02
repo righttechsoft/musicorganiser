@@ -68,6 +68,9 @@ public partial class StarRating : UserControl
         {
             // Click the current rating to clear; otherwise set to the clicked star.
             Rating = Rating == value ? null : value;
+            // Stars are non-focusable TextBlocks, so inside a DataGrid cell the binding's
+            // default LostFocus trigger never fires. Commit the new value to the source now.
+            GetBindingExpression(RatingProperty)?.UpdateSource();
             e.Handled = true;
         }
     }

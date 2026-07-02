@@ -1,0 +1,12 @@
+{
+  "name": "Music Organiser Remote",
+  "short_name": "Organiser",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#121212",
+  "theme_color": "#1e1e1e",
+  "icons": [
+    { "src": "/icon.png", "sizes": "any", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

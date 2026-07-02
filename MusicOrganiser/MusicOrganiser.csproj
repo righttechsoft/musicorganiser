@@ -21,4 +21,13 @@
     <Resource Include="logo.ico" />
   </ItemGroup>
 
+  <!-- PWA web client served from / by ControlApiService. Embedded (not loose files)
+       so it survives single-file publish. LogicalName = stable lookup key web/<file>. -->
+  <ItemGroup>
+    <EmbeddedResource Include="WebApp\index.html"><LogicalName>web/index.html</LogicalName></EmbeddedResource>
+    <EmbeddedResource Include="WebApp\manifest.webmanifest"><LogicalName>web/manifest.webmanifest</LogicalName></EmbeddedResource>
+    <EmbeddedResource Include="WebApp\sw.js"><LogicalName>web/sw.js</LogicalName></EmbeddedResource>
+    <EmbeddedResource Include="logo.png"><LogicalName>web/icon.png</LogicalName></EmbeddedResource>
+  </ItemGroup>
+
 </Project>

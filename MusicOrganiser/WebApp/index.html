@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Music Organiser Remote</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#1e1e1e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Organiser">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<style>
+  :root { --bg:#121212; --card:#1e1e1e; --card2:#262626; --fg:#eee; --mut:#9a9a9a; --acc:#3da9fc; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,sans-serif;
+         padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .wrap { max-width:560px; margin:0 auto; padding:12px; }
+  .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .np-title { font-size:18px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .np-sub { color:var(--mut); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+  .times { display:flex; justify-content:space-between; color:var(--mut); font-size:12px; margin-top:4px; }
+  input[type=range] { width:100%; accent-color:var(--acc); height:28px; }
+  .transport { display:flex; gap:8px; justify-content:center; align-items:center; margin-top:6px; }
+  button { background:var(--card2); color:var(--fg); border:none; border-radius:10px; padding:10px 12px;
+           font-size:16px; cursor:pointer; }
+  button:active { background:#333; }
+  .transport button { min-width:54px; }
+  .play { background:var(--acc); color:#012; font-weight:700; min-width:64px; }
+  .on { background:var(--acc); color:#012; }
+  .vol { display:flex; align-items:center; gap:10px; }
+  .vol span { color:var(--mut); font-size:13px; width:34px; text-align:right; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button { flex:1; }
+  .tabs .sel { background:var(--acc); color:#012; font-weight:600; }
+  .list { display:flex; flex-direction:column; }
+  .row { display:flex; align-items:center; gap:10px; padding:11px 10px; border-radius:10px; cursor:pointer; }
+  .row:active { background:var(--card2); }
+  .row .ic { width:20px; text-align:center; color:var(--mut); flex:0 0 auto; }
+  .row .meta { min-width:0; flex:1; }
+  .row .t { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .s { color:var(--mut); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row.playing .t { color:var(--acc); font-weight:600; }
+  .row .dur { color:var(--mut); font-size:12px; flex:0 0 auto; }
+  .crumb { color:var(--mut); font-size:12px; word-break:break-all; margin-bottom:8px; }
+  .empty { color:var(--mut); text-align:center; padding:24px 0; }
+  .bar { display:flex; gap:8px; margin-bottom:8px; }
+  .bar button { flex:1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <div id="npTitle" class="np-title">Nothing playing</div>
+    <div id="npSub" class="np-sub"></div>
+    <input id="seek" type="range" min="0" max="0" value="0" step="1">
+    <div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
+    <div class="transport">
+      <button id="bPrev" title="Previous">⏮</button>
+      <button id="bPlay" class="play" title="Play/Pause">▶</button>
+      <button id="bStop" title="Stop">⏹</button>
+      <button id="bNext" title="Next">⏭</button>
+      <button id="bShuf" title="Shuffle">🔀</button>
+      <button id="bRep" title="Repeat">🔁</button>
+    </div>
+    <div class="vol" style="margin-top:12px">
+      <span>🔉</span>
+      <input id="vol" type="range" min="0" max="100" value="50" step="1">
+      <span id="volv">50</span>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="files" class="sel">Files</button>
+    <button data-tab="browse">Browse</button>
+    <button data-tab="history">History</button>
+  </div>
+
+  <div id="paneFiles" class="card"><div class="list" id="files"></div></div>
+
+  <div id="paneBrowse" class="card" hidden>
+    <div class="bar">
+      <button id="brUp">⬆ Up</button>
+      <button id="brOpen">▶ Play this folder</button>
+    </div>
+    <div id="brCrumb" class="crumb"></div>
+    <div class="list" id="browse"></div>
+  </div>
+
+  <div id="paneHistory" class="card" hidden><div class="list" id="history"></div></div>
+
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const post = (p, body) => fetch(p, { method:'POST',
+  headers: body ? {'Content-Type':'application/json'} : {},
+  body: body ? JSON.stringify(body) : undefined });
+const getJson = async p => { const r = await fetch(p); return r.ok ? r.json() : null; };
+const fmt = s => { s = Math.max(0, s|0); const m = (s/60)|0; const ss = s%60; return m + ':' + String(ss).padStart(2,'0'); };
+
+let seeking = false, volBusy = false, lastNow = null;
+
+// ---- transport ----
+$('#bPrev').onclick = () => post('/playback/previous');
+$('#bPlay').onclick = () => post('/playback/playpause');
+$('#bStop').onclick = () => post('/playback/stop');
+$('#bNext').onclick = () => post('/playback/next');
+$('#bShuf').onclick = () => post('/playback/shuffle');
+$('#bRep').onclick  = () => post('/playback/repeat');
+
+const seek = $('#seek');
+seek.addEventListener('input', () => { seeking = true; $('#tCur').textContent = fmt(+seek.value); });
+seek.addEventListener('change', async () => { await post('/playback/seek', { positionSec:+seek.value }); seeking = false; });
+
+const vol = $('#vol');
+const sendVol = () => post('/volume', { level:+vol.value });
+vol.addEventListener('input', () => { volBusy = true; $('#volv').textContent = vol.value; });
+vol.addEventListener('change', async () => { await sendVol(); volBusy = false; });
+
+// ---- status poll ----
+async function poll() {
+  const s = await getJson('/status');
+  if (!s) return;
+  const np = s.nowPlaying;
+  $('#npTitle').textContent = np ? (np.title || np.path.split(/[\\/]/).pop()) : 'Nothing playing';
+  $('#npSub').textContent = np ? [np.artist, np.album].filter(Boolean).join(' — ') : '';
+  $('#bPlay').textContent = s.isPlaying ? '⏸' : '▶';
+  $('#bShuf').classList.toggle('on', !!s.shuffle);
+  $('#bRep').classList.toggle('on', s.repeat && s.repeat !== 'off');
+  $('#bRep').textContent = s.repeat === 'one' ? '🔂' : '🔁';
+  if (!seeking) {
+    seek.max = s.durationSec || 0;
+    seek.value = s.positionSec || 0;
+    $('#tCur').textContent = fmt(s.positionSec || 0);
+  }
+  $('#tDur').textContent = fmt(s.durationSec || 0);
+  if (!volBusy) { vol.value = s.volume ?? 50; $('#volv').textContent = vol.value; }
+  // Re-render the files list when the playing track changes (keeps the highlight fresh).
+  const key = np ? np.path : null;
+  if (key !== lastNow) { lastNow = key; if (tab === 'files') loadFiles(); }
+}
+
+// ---- tabs ----
+let tab = 'files';
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
+function setTab(t) {
+  tab = t;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('sel', b.dataset.tab === t));
+  $('#paneFiles').hidden   = t !== 'files';
+  $('#paneBrowse').hidden  = t !== 'browse';
+  $('#paneHistory').hidden = t !== 'history';
+  if (t === 'files') loadFiles();
+  if (t === 'browse') loadBrowse(browsePath);
+  if (t === 'history') loadHistory();
+}
+
+// ---- files (current folder / queue) ----
+async function loadFiles() {
+  const files = await getJson('/files');
+  const el = $('#files'); el.innerHTML = '';
+  if (!files || !files.length) { el.innerHTML = '<div class="empty">No files loaded. Use Browse to open a folder.</div>'; return; }
+  for (const f of files) {
+    const row = document.createElement('div');
+    row.className = 'row' + (f.isPlaying ? ' playing' : '');
+    row.innerHTML = `<div class="ic">${f.isPlaying ? '▶' : '♪'}</div>
+      <div class="meta"><div class="t"></div><div class="s"></div></div>
+      <div class="dur">${fmt(f.durationSec || 0)}</div>`;
+    row.querySelector('.t').textContent = f.title || f.path.split(/[\\/]/).pop();
+    row.querySelector('.s').textContent = [f.artist, f.album].filter(Boolean).join(' — ');
+    row.onclick = () => post('/play', { path:f.path }).then(poll);
+    el.appendChild(row);
+  }
+}
+
+// ---- browse (filesystem) ----
+let browsePath = '';
+$('#brUp').onclick = () => {
+  if (!browsePath) return;
+  const p = browsePath.replace(/[\\/]+$/, '');
+  const cut = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+  loadBrowse(cut > 1 ? p.slice(0, cut) : ''); // above a drive root → drives list
+};
+$('#brOpen').onclick = () => { if (browsePath) post('/folder', { path:browsePath }).then(() => setTab('files')); };
+
+async function loadBrowse(path) {
+  const data = await getJson('/browse?path=' + encodeURIComponent(path || ''));
+  if (!data) return;
+  browsePath = data.path || '';
+  $('#brCrumb').textContent = browsePath || 'This PC (drives)';
+  $('#brOpen').style.visibility = browsePath ? 'visible' : 'hidden';
+  const el = $('#browse'); el.innerHTML = '';
+  if (!data.folders.length) { el.innerHTML = '<div class="empty">No subfolders.</div>'; return; }
+  for (const d of data.folders) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<div class="ic">📁</div><div class="meta"><div class="t"></div></div><div class="dur">›</div>`;
+    row.querySelector('.t').textContent = d.name || d.path;
+    row.onclick = () => loadBrowse(d.path);
+    el.appendChild(row);
+  }
+}
+
+// ---- history (recent played folders) ----
+async function loadHistory() {
+  const items = await getJson('/history');
+  const el = $('#history'); el.innerHTML = '';
+  if (!items || !items.length) { el.innerHTML = '<div class="empty">No history yet.</div>'; return; }
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<div class="ic">🕘</div><div class="meta"><div class="t"></div><div class="s"></div></div>`;
+    row.querySelector('.t').textContent = it.displayName || it.path;
+    row.querySelector('.s').textContent = it.path;
+    row.onclick = () => post('/folder', { path:it.path }).then(() => setTab('files'));
+    el.appendChild(row);
+  }
+}
+
+// ---- boot ----
+loadFiles();
+poll();
+setInterval(poll, 1000);
+if ('serviceWorker' in navigator) {
+  // Throws on an insecure origin (phone over plain HTTP) — caught and ignored.
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>

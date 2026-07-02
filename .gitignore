@@ -20,3 +20,11 @@ publish/
 
 # Windows reserved-name junk file
 nul
+
+# Apple signing secrets — NEVER commit
+*.p8
+AuthKey_*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest

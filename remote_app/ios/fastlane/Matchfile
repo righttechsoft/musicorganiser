@@ -1,0 +1,10 @@
+# Private git repo that stores the encrypted signing cert + provisioning profiles.
+# Create an EMPTY private repo (e.g. github.com/YOURORG/ios-certificates) and put it here.
+git_url("https://github.com/righttechsoft/ios-certificates.git")
+storage_mode("git")
+
+type("appstore")
+
+# Every bundle id that ships in the build must be listed so match makes a profile for each.
+# Phone-only for now; add "…​.watchkitapp" here once the watch target exists in Xcode.
+app_identifier(["com.righttechsoft.musicOrganiserRemote"])

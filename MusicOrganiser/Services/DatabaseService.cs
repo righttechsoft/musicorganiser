@@ -49,6 +49,7 @@ public sealed class DatabaseService
             ExecRaw(conn, "PRAGMA journal_mode=WAL;");
             ExecRaw(conn, "PRAGMA foreign_keys=ON;");
             ExecRaw(conn, SchemaSql);
+            MigratePlaylistColumns(conn);
             IsReady = true;
         }
         catch
@@ -70,6 +71,22 @@ public sealed class DatabaseService
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
+    }
+
+    // Adds the playback-state columns to pre-existing DBs (CREATE TABLE IF NOT EXISTS
+    // won't alter a table that already exists). Each ALTER throws if the column is
+    // already there — ignore that.
+    private static void MigratePlaylistColumns(SqliteConnection conn)
+    {
+        foreach (var ddl in new[]
+        {
+            "ALTER TABLE playlists ADD COLUMN shuffle INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE playlists ADD COLUMN repeat_mode INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE playlists ADD COLUMN last_full_path TEXT;"
+        })
+        {
+            try { ExecRaw(conn, ddl); } catch { /* column already exists */ }
+        }
     }
 
     // ---------------------------------------------------------------- Files
@@ -94,6 +111,35 @@ public sealed class DatabaseService
                 list.Add(ReadFileRow(r));
         }
         catch { /* serve what we have */ }
+        return list;
+    }
+
+    /// <summary>Returns all cached (non-deleted) files whose path is under <paramref name="folderPath"/>
+    /// (the folder and any subfolder). Used to enrich the recursive "play folder" queue with metadata.</summary>
+    public IReadOnlyList<MusicFile> GetCachedFilesUnder(string folderPath)
+    {
+        var list = new List<MusicFile>();
+        if (!IsReady || string.IsNullOrEmpty(folderPath)) return list;
+        try
+        {
+            // Prefix match on full_path. '|' is the LIKE escape char — it can't occur in a
+            // Windows path, so escaping %, _ and | makes the prefix exact for real folders.
+            var prefix = folderPath.TrimEnd('\\') + "\\";
+            prefix = prefix.Replace("|", "||").Replace("%", "|%").Replace("_", "|_");
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
+                       f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
+                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags
+                FROM files f
+                WHERE f.is_deleted = 0 AND f.full_path LIKE $prefix ESCAPE '|';";
+            cmd.Parameters.AddWithValue("$prefix", prefix + "%");
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(ReadFileRow(r));
+        }
+        catch { }
         return list;
     }
 
@@ -495,6 +541,265 @@ public sealed class DatabaseService
         return list;
     }
 
+    // ------------------------------------------------------------ Playlists
+
+    /// <summary>Creates a playlist and returns its new id (0 on failure).</summary>
+    public int CreatePlaylist(string name)
+    {
+        if (!IsReady) return 0;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO playlists (name, created_utc, modified_utc, is_deleted)
+                VALUES ($n, $now, $now, 0);
+                SELECT last_insert_rowid();";
+            cmd.Parameters.AddWithValue("$n", string.IsNullOrWhiteSpace(name) ? "New Playlist" : name.Trim());
+            cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            var v = cmd.ExecuteScalar();
+            return v == null || v == DBNull.Value ? 0 : Convert.ToInt32(v);
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Persists a playlist's playback state (shuffle/repeat mode + last track played).</summary>
+    public void SavePlaylistState(int id, bool shuffle, int repeatMode, string? lastFullPath)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"UPDATE playlists
+                SET shuffle = $s, repeat_mode = $r, last_full_path = $p
+                WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$s", shuffle ? 1 : 0);
+            cmd.Parameters.AddWithValue("$r", repeatMode);
+            cmd.Parameters.AddWithValue("$p", (object?)lastFullPath ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public void RenamePlaylist(int id, string name)
+    {
+        if (!IsReady || string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE playlists SET name = $n, modified_utc = $now WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$n", name.Trim());
+            cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public void DeletePlaylist(int id)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE playlists SET is_deleted = 1 WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public IReadOnlyList<Playlist> GetPlaylists()
+    {
+        var list = new List<Playlist>();
+        if (!IsReady) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT p.id, p.name, p.created_utc, p.modified_utc,
+                       (SELECT COUNT(*) FROM playlist_entries pe WHERE pe.playlist_id = p.id) AS cnt,
+                       p.shuffle, p.repeat_mode, p.last_full_path
+                FROM playlists p
+                WHERE p.is_deleted = 0
+                ORDER BY p.name COLLATE NOCASE;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new Playlist
+                {
+                    Id = r.GetInt32(0),
+                    Name = r.IsDBNull(1) ? string.Empty : r.GetString(1),
+                    CreatedUtc = r.IsDBNull(2) ? null : ParseTime(r.GetString(2)),
+                    ModifiedUtc = r.IsDBNull(3) ? null : ParseTime(r.GetString(3)),
+                    TrackCount = r.IsDBNull(4) ? 0 : (int)r.GetInt64(4),
+                    Shuffle = !r.IsDBNull(5) && r.GetInt64(5) != 0,
+                    Repeat = r.IsDBNull(6) ? 0 : (int)r.GetInt64(6),
+                    LastFullPath = r.IsDBNull(7) ? null : r.GetString(7)
+                });
+            }
+        }
+        catch { }
+        return list;
+    }
+
+    /// <summary>Returns a playlist's tracks in order. Each <see cref="MusicFile.PlaylistEntryId"/>
+    /// is set to the playlist_entries id. Tracks whose file row is missing from the cache are
+    /// returned with just their path/file name so they remain visible and playable.</summary>
+    public IReadOnlyList<MusicFile> GetPlaylistFiles(int id)
+    {
+        var list = new List<MusicFile>();
+        if (!IsReady) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT pe.id, pe.full_path,
+                       f.file_name, f.title, f.artist, f.album, f.genre, f.year,
+                       f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
+                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags
+                FROM playlist_entries pe
+                LEFT JOIN files f ON f.full_path = pe.full_path AND f.is_deleted = 0
+                WHERE pe.playlist_id = $id
+                ORDER BY pe.position;";
+            cmd.Parameters.AddWithValue("$id", id);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var fullPath = r.GetString(1);
+                var mf = new MusicFile
+                {
+                    PlaylistEntryId = r.GetInt32(0),
+                    FullPath = fullPath,
+                    FileName = r.IsDBNull(2) ? Path.GetFileName(fullPath) : r.GetString(2),
+                    Title = r.IsDBNull(3) ? string.Empty : r.GetString(3),
+                    Artist = r.IsDBNull(4) ? string.Empty : r.GetString(4),
+                    Album = r.IsDBNull(5) ? string.Empty : r.GetString(5),
+                    Genre = r.IsDBNull(6) ? string.Empty : r.GetString(6),
+                    Year = r.IsDBNull(7) ? 0u : (uint)r.GetInt64(7),
+                    Duration = r.IsDBNull(8) ? TimeSpan.Zero : TimeSpan.FromTicks(r.GetInt64(8)),
+                    Bitrate = r.IsDBNull(9) ? 0 : r.GetInt32(9),
+                    SampleRate = r.IsDBNull(10) ? 0 : r.GetInt32(10),
+                    FileSize = r.IsDBNull(11) ? 0 : r.GetInt64(11),
+                    FileModifiedUtc = ParseTime(r.IsDBNull(12) ? null : r.GetString(12)),
+                    Rating = r.IsDBNull(13) ? null : r.GetInt32(13),
+                    Tags = r.IsDBNull(14) ? string.Empty : r.GetString(14)
+                };
+                list.Add(mf);
+            }
+        }
+        catch { }
+        return list;
+    }
+
+    /// <summary>Appends paths to a playlist (skipping any already present), after the last position.</summary>
+    public void AddToPlaylist(int id, IEnumerable<string> paths)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            int nextPos;
+            using (var max = conn.CreateCommand())
+            {
+                max.Transaction = tx;
+                max.CommandText = "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_entries WHERE playlist_id = $id;";
+                max.Parameters.AddWithValue("$id", id);
+                nextPos = Convert.ToInt32(max.ExecuteScalar());
+            }
+
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var ex = conn.CreateCommand())
+            {
+                ex.Transaction = tx;
+                ex.CommandText = "SELECT full_path FROM playlist_entries WHERE playlist_id = $id;";
+                ex.Parameters.AddWithValue("$id", id);
+                using var er = ex.ExecuteReader();
+                while (er.Read()) existing.Add(er.GetString(0));
+            }
+
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = @"
+                INSERT INTO playlist_entries (playlist_id, full_path, position, added_utc)
+                VALUES ($id, $path, $pos, $now);";
+            var pId = cmd.Parameters.Add("$id", SqliteType.Integer);
+            var pPath = cmd.Parameters.Add("$path", SqliteType.Text);
+            var pPos = cmd.Parameters.Add("$pos", SqliteType.Integer);
+            var pNow = cmd.Parameters.Add("$now", SqliteType.Text);
+            var now = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+
+            foreach (var path in paths)
+            {
+                if (string.IsNullOrWhiteSpace(path) || !existing.Add(path)) continue;
+                pId.Value = id;
+                pPath.Value = path;
+                pPos.Value = nextPos++;
+                pNow.Value = now;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+        catch { }
+    }
+
+    public void RemoveFromPlaylist(int id, IEnumerable<int> entryIds)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "DELETE FROM playlist_entries WHERE id = $e AND playlist_id = $id;";
+            var pE = cmd.Parameters.Add("$e", SqliteType.Integer);
+            var pId = cmd.Parameters.Add("$id", SqliteType.Integer);
+            foreach (var e in entryIds)
+            {
+                pE.Value = e;
+                pId.Value = id;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+        catch { }
+    }
+
+    /// <summary>Rewrites the position column so entries follow <paramref name="entryIdsInNewOrder"/>.</summary>
+    public void ReorderPlaylist(int id, IReadOnlyList<int> entryIdsInNewOrder)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE playlist_entries SET position = $pos WHERE id = $e AND playlist_id = $id;";
+            var pPos = cmd.Parameters.Add("$pos", SqliteType.Integer);
+            var pE = cmd.Parameters.Add("$e", SqliteType.Integer);
+            var pId = cmd.Parameters.Add("$id", SqliteType.Integer);
+            for (int i = 0; i < entryIdsInNewOrder.Count; i++)
+            {
+                pPos.Value = i;
+                pE.Value = entryIdsInNewOrder[i];
+                pId.Value = id;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+        catch { }
+    }
+
     // --------------------------------------------------------------- Helpers
 
     private static (string table, string linkTable, string idCol) TagTables(string kind)
@@ -605,8 +910,26 @@ public sealed class DatabaseService
             tag_id    INTEGER NOT NULL REFERENCES tags(id)    ON DELETE CASCADE,
             PRIMARY KEY (folder_id, tag_id)
         );
+        CREATE TABLE IF NOT EXISTS playlists (
+            id             INTEGER PRIMARY KEY,
+            name           TEXT NOT NULL,
+            created_utc    TEXT,
+            modified_utc   TEXT,
+            is_deleted     INTEGER NOT NULL DEFAULT 0,
+            shuffle        INTEGER NOT NULL DEFAULT 0,
+            repeat_mode    INTEGER NOT NULL DEFAULT 0,
+            last_full_path TEXT
+        );
+        CREATE TABLE IF NOT EXISTS playlist_entries (
+            id          INTEGER PRIMARY KEY,
+            playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+            full_path   TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            added_utc   TEXT
+        );
         CREATE INDEX IF NOT EXISTS ix_files_folder    ON files(folder_path);
         CREATE INDEX IF NOT EXISTS ix_folders_parent  ON folders(parent_path);
         CREATE INDEX IF NOT EXISTS ix_file_tags_tag   ON file_tags(tag_id);
-        CREATE INDEX IF NOT EXISTS ix_folder_tags_tag ON folder_tags(tag_id);";
+        CREATE INDEX IF NOT EXISTS ix_folder_tags_tag ON folder_tags(tag_id);
+        CREATE INDEX IF NOT EXISTS ix_playlist_entries_order ON playlist_entries(playlist_id, position);";
 }

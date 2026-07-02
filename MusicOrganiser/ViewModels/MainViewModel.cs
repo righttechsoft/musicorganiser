@@ -21,6 +21,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     private readonly FileOperationsService _fileOperations;
     private readonly ArtistInfoService _artistInfoService;
     private readonly AppSettings _appSettings;
+    private readonly ControlApiService _controlApi;
 
     private string _currentFolderPath = string.Empty;
     private MusicFile? _selectedFile;
@@ -33,6 +34,9 @@ public class MainViewModel : ViewModelBase, IDisposable
     private bool _disposed;
     private bool _stoppedByUser;
     private CancellationTokenSource? _loadingCts;
+    // Folder being played as a recursive queue; swallows the one selection-echo LoadFolder
+    // that fires when clicking ▶ moves tree selection (which would wipe the queue).
+    private string? _playTreeFolder;
     private string _artistSummary = string.Empty;
     private bool _isLoadingArtistInfo;
     private ImageSource? _albumCover;
@@ -42,6 +46,58 @@ public class MainViewModel : ViewModelBase, IDisposable
     public RecentPlayedFolders RecentPlayedStore { get; }
     public ObservableCollection<RecentPlayedFolderItem> RecentPlayedFolders { get; } = new();
     public ObservableCollection<MusicFile> MusicFiles { get; } = new();
+    public ObservableCollection<Playlist> Playlists { get; } = new();
+
+    // Playlist view state. MusicFiles doubles as the playback queue; when a playlist is
+    // loaded it holds the playlist's tracks, otherwise the selected folder's files.
+    private Playlist? _selectedPlaylist;
+    private int? _currentPlaylistId;
+
+    // Playback modifiers.
+    private bool _shuffleEnabled;
+    private RepeatMode _repeat = RepeatMode.Off;
+    private List<int>? _shuffleOrder;   // permutation of MusicFiles indices; rebuilt lazily
+    private readonly Random _rng = new();
+    private bool _suppressPlaylistPersist;   // true while restoring a playlist's saved state
+
+    public Playlist? SelectedPlaylist
+    {
+        get => _selectedPlaylist;
+        set => SetProperty(ref _selectedPlaylist, value);
+    }
+
+    public bool IsPlaylistView => _currentPlaylistId != null;
+    public int? CurrentPlaylistId => _currentPlaylistId;
+
+    public bool ShuffleEnabled
+    {
+        get => _shuffleEnabled;
+        private set
+        {
+            if (SetProperty(ref _shuffleEnabled, value))
+            {
+                _shuffleOrder = null;
+                PersistPlaylistState();
+            }
+        }
+    }
+
+    public RepeatMode Repeat
+    {
+        get => _repeat;
+        private set
+        {
+            if (SetProperty(ref _repeat, value))
+            {
+                OnPropertyChanged(nameof(RepeatGlyph));
+                OnPropertyChanged(nameof(RepeatActive));
+                PersistPlaylistState();
+            }
+        }
+    }
+
+    public bool RepeatActive => _repeat != RepeatMode.Off;
+    public string RepeatGlyph => _repeat == RepeatMode.One ? "\U0001F502" : "\U0001F501"; // 🔂 / 🔁
 
     public string CurrentFolderPath
     {
@@ -128,6 +184,13 @@ public class MainViewModel : ViewModelBase, IDisposable
     public string CurrentPositionFormatted => FormatTime(CurrentPosition);
     public string TotalDurationFormatted => FormatTime(TotalDuration);
 
+    private bool _isLoadingFiles;
+    public bool IsLoadingFiles
+    {
+        get => _isLoadingFiles;
+        set => SetProperty(ref _isLoadingFiles, value);
+    }
+
     public string ArtistSummary
     {
         get => _artistSummary;
@@ -152,6 +215,9 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand NextCommand { get; }
     public ICommand PlayFileCommand { get; }
     public ICommand RefreshArtistInfoCommand { get; }
+    public ICommand ToggleShuffleCommand { get; }
+    public ICommand CycleRepeatCommand { get; }
+    public ICommand PlayFolderCommand { get; }
 
     public AudioPlayerService AudioPlayer => _audioPlayer;
     public FileOperationsService FileOperations => _fileOperations;
@@ -187,6 +253,25 @@ public class MainViewModel : ViewModelBase, IDisposable
         NextCommand = new RelayCommand(Next);
         PlayFileCommand = new RelayCommand(PlayFile);
         RefreshArtistInfoCommand = new RelayCommand(RefreshArtistInfo);
+        ToggleShuffleCommand = new RelayCommand(() => ShuffleEnabled = !ShuffleEnabled);
+        CycleRepeatCommand = new RelayCommand(CycleRepeat);
+        PlayFolderCommand = new RelayCommand(p => _ = PlayFolderTreeAsync((p as FolderNode)?.FullPath));
+
+        RefreshPlaylists();
+
+        // Local HTTP control API (for the mobile remote). Fails soft if it can't bind.
+        _controlApi = new ControlApiService(this);
+        _controlApi.Start();
+    }
+
+    private void CycleRepeat()
+    {
+        Repeat = _repeat switch
+        {
+            RepeatMode.Off => RepeatMode.All,
+            RepeatMode.All => RepeatMode.One,
+            _ => RepeatMode.Off
+        };
     }
 
     private void AddRecentPlayedFolder(string? folderPath)
@@ -222,10 +307,25 @@ public class MainViewModel : ViewModelBase, IDisposable
 
     public void LoadFolder(string path)
     {
+        // Ignore the selection echo from clicking ▶ on an unselected folder; the recursive
+        // play queue already owns this folder and a reload would wipe it (consume once).
+        if (_playTreeFolder != null && string.Equals(path, _playTreeFolder, StringComparison.OrdinalIgnoreCase))
+        {
+            _playTreeFolder = null;
+            return;
+        }
+        _playTreeFolder = null;
+
         // Cancel any previous loading operation
         _loadingCts?.Cancel();
         _loadingCts = new CancellationTokenSource();
         var token = _loadingCts.Token;
+
+        // Leaving playlist view: clear the playlist context and deselect it in the list.
+        _currentPlaylistId = null;
+        _shuffleOrder = null;
+        OnPropertyChanged(nameof(IsPlaylistView));
+        SelectedPlaylist = null;
 
         CurrentFolderPath = path;
         MusicFiles.Clear();
@@ -233,6 +333,90 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         _ = LoadFolderAsync(path, token);
         _ = LoadAlbumCoverAsync(path, token);
+    }
+
+    /// <summary>Queues every supported track under <paramref name="folderPath"/> (recursively,
+    /// including subfolders) and starts playback. Shuffle/repeat apply to the queue as usual.</summary>
+    public async Task PlayFolderTreeAsync(string? folderPath)
+    {
+        if (string.IsNullOrWhiteSpace(folderPath)) return;
+
+        _loadingCts?.Cancel();
+        _loadingCts = new CancellationTokenSource();
+        var token = _loadingCts.Token;
+        IsLoadingFiles = true;
+        // Claim this folder so the selection echo (clicking ▶ moves tree selection) is ignored.
+        _playTreeFolder = folderPath;
+        try
+        {
+
+        // Leaving playlist view: this is a folder-style queue.
+        _currentPlaylistId = null;
+        _shuffleOrder = null;
+        OnPropertyChanged(nameof(IsPlaylistView));
+        SelectedPlaylist = null;
+
+        var files = await Task.Run(() =>
+        {
+            List<string> paths;
+            try
+            {
+                paths = Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)
+                    .Where(MusicMetadataService.IsSupportedFile)
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch { paths = new List<string>(); }
+
+            // Enrich from the cache; parse tags for not-yet-scanned files so duration/title show.
+            var meta = DatabaseService.Instance.GetCachedFilesUnder(folderPath)
+                .GroupBy(f => f.FullPath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+            var result = new List<MusicFile>(paths.Count);
+            var parsed = new List<MusicFile>();
+            foreach (var p in paths)
+            {
+                if (meta.TryGetValue(p, out var cached)) { result.Add(cached); continue; }
+                var mf = _metadataService.ReadMetadata(p)
+                         ?? new MusicFile { FullPath = p, FileName = Path.GetFileName(p) };
+                result.Add(mf);
+                parsed.Add(mf);
+            }
+
+            // Warm the cache (grouped by directory) so a re-play is instant.
+            // ponytail: parses every uncached file up front; fine for a folder tree,
+            // make it progressive if someone "plays" their whole library and waits.
+            foreach (var grp in parsed.GroupBy(f => Path.GetDirectoryName(f.FullPath) ?? string.Empty))
+                if (grp.Key.Length > 0) DatabaseService.Instance.UpsertFiles(grp.Key, grp);
+
+            return result;
+        }, token);
+
+        if (token.IsCancellationRequested) return;
+
+        CurrentFolderPath = folderPath;
+        MusicFiles.Clear();
+        AlbumCover = null;
+        foreach (var f in files)
+        {
+            HookFile(f);
+            MusicFiles.Add(f);
+        }
+
+        if (MusicFiles.Count > 0)
+        {
+            SelectedFile = MusicFiles[0];
+            PlayFile(MusicFiles[0]);
+            // Cover comes from the playing track's folder (the clicked folder may hold only subfolders).
+            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(MusicFiles[0].FullPath) ?? folderPath, token);
+        }
+        }
+        finally
+        {
+            // Only clear if a newer load hasn't superseded this one.
+            if (token == _loadingCts?.Token) IsLoadingFiles = false;
+        }
     }
 
     private async Task LoadAlbumCoverAsync(string path, CancellationToken token)
@@ -286,20 +470,29 @@ public class MainViewModel : ViewModelBase, IDisposable
             });
         }
 
-        // 2. Authoritative refresh: diff the filesystem, re-parse only changed files.
-        IReadOnlyList<MusicFile> fresh;
-        try { fresh = await LibraryCacheService.Instance.RefreshFolderFilesAsync(path, token); }
-        catch (OperationCanceledException) { return; }
-        catch { return; }
-
-        if (token.IsCancellationRequested) return;
-
-        // 3. Reconcile the grid against the fresh, authoritative list.
-        Application.Current?.Dispatcher.Invoke(() =>
+        // Spinner only for cold folders (cache miss) — a cache hit is instant, no flicker.
+        if (cached.Count == 0) IsLoadingFiles = true;
+        try
         {
+            // 2. Authoritative refresh: diff the filesystem, re-parse only changed files.
+            IReadOnlyList<MusicFile> fresh;
+            try { fresh = await LibraryCacheService.Instance.RefreshFolderFilesAsync(path, token); }
+            catch (OperationCanceledException) { return; }
+            catch { return; }
+
             if (token.IsCancellationRequested) return;
-            ReconcileMusicFiles(fresh);
-        });
+
+            // 3. Reconcile the grid against the fresh, authoritative list.
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                if (token.IsCancellationRequested) return;
+                ReconcileMusicFiles(fresh);
+            });
+        }
+        finally
+        {
+            if (token == _loadingCts?.Token) IsLoadingFiles = false;
+        }
     }
 
     private void ReconcileMusicFiles(IReadOnlyList<MusicFile> fresh)
@@ -376,6 +569,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             IsPlaying = true;
 
             AddRecentPlayedFolder(Path.GetDirectoryName(file.FullPath));
+            PersistPlaylistState();   // remember this as the playlist's last track
 
             // Only load artist info from cache (don't fetch from API automatically)
             LoadArtistInfoFromCache(file);
@@ -461,27 +655,68 @@ public class MainViewModel : ViewModelBase, IDisposable
     private void Previous()
     {
         if (NowPlaying == null || MusicFiles.Count == 0) return;
-
-        var index = MusicFiles.IndexOf(NowPlaying);
-        if (index > 0)
+        var prev = GetAdjacent(NowPlaying, -1, _repeat == RepeatMode.All);
+        if (prev != null)
         {
-            var prevFile = MusicFiles[index - 1];
-            SelectedFile = prevFile;
-            PlayFile(prevFile);
+            SelectedFile = prev;
+            PlayFile(prev);
         }
     }
 
     private void Next()
     {
         if (NowPlaying == null || MusicFiles.Count == 0) return;
-
-        var index = MusicFiles.IndexOf(NowPlaying);
-        if (index < MusicFiles.Count - 1)
+        var next = GetAdjacent(NowPlaying, +1, _repeat == RepeatMode.All);
+        if (next != null)
         {
-            var nextFile = MusicFiles[index + 1];
-            SelectedFile = nextFile;
-            PlayFile(nextFile);
+            SelectedFile = next;
+            PlayFile(next);
         }
+    }
+
+    /// <summary>Returns the track <paramref name="direction"/> steps from <paramref name="current"/> in
+    /// the active queue, following shuffle order when enabled. Wraps around when <paramref name="wrap"/>
+    /// is true, otherwise returns null at the ends.</summary>
+    private MusicFile? GetAdjacent(MusicFile current, int direction, bool wrap)
+    {
+        int n = MusicFiles.Count;
+        if (n == 0) return null;
+        int curIdx = MusicFiles.IndexOf(current);
+        if (curIdx < 0) return null;
+
+        if (_shuffleEnabled)
+        {
+            EnsureShuffleOrder();
+            int pos = _shuffleOrder!.IndexOf(curIdx);
+            if (pos < 0) return null;
+            int npos = pos + direction;
+            if (npos < 0 || npos >= n)
+            {
+                if (!wrap) return null;
+                npos = (npos % n + n) % n;
+            }
+            return MusicFiles[_shuffleOrder[npos]];
+        }
+
+        int nidx = curIdx + direction;
+        if (nidx < 0 || nidx >= n)
+        {
+            if (!wrap) return null;
+            nidx = (nidx % n + n) % n;
+        }
+        return MusicFiles[nidx];
+    }
+
+    private void EnsureShuffleOrder()
+    {
+        if (_shuffleOrder != null && _shuffleOrder.Count == MusicFiles.Count) return;
+        var order = Enumerable.Range(0, MusicFiles.Count).ToList();
+        for (int i = order.Count - 1; i > 0; i--)
+        {
+            int j = _rng.Next(i + 1);
+            (order[i], order[j]) = (order[j], order[i]);
+        }
+        _shuffleOrder = order;
     }
 
     private void OnPositionChanged(object? sender, TimeSpan position)
@@ -504,19 +739,25 @@ public class MainViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        // Auto-play next track when current track ends naturally
-        if (NowPlaying != null)
+        if (NowPlaying == null) return;
+
+        // Repeat-one: replay the same track.
+        if (_repeat == RepeatMode.One)
         {
-            var index = MusicFiles.IndexOf(NowPlaying);
-            if (index < MusicFiles.Count - 1)
+            var same = NowPlaying;
+            System.Windows.Application.Current?.Dispatcher.Invoke(() => PlayFile(same));
+            return;
+        }
+
+        // Auto-play next track when current track ends naturally (wrap when Repeat-all).
+        var nextFile = GetAdjacent(NowPlaying, +1, _repeat == RepeatMode.All);
+        if (nextFile != null)
+        {
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
-                var nextFile = MusicFiles[index + 1];
-                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
-                {
-                    SelectedFile = nextFile;
-                    PlayFile(nextFile);
-                });
-            }
+                SelectedFile = nextFile;
+                PlayFile(nextFile);
+            });
         }
     }
 
@@ -527,16 +768,204 @@ public class MainViewModel : ViewModelBase, IDisposable
             : time.ToString(@"m\:ss");
     }
 
+    // ----------------------------------------------------------- Playlists
+
+    /// <summary>Reloads the playlist list from the cache, preserving the current selection by id.</summary>
+    public void RefreshPlaylists()
+    {
+        var selId = _selectedPlaylist?.Id;
+        Playlists.Clear();
+        foreach (var p in DatabaseService.Instance.GetPlaylists())
+            Playlists.Add(p);
+        if (selId != null)
+        {
+            var match = Playlists.FirstOrDefault(p => p.Id == selId.Value);
+            if (match != null) SelectedPlaylist = match;
+        }
+    }
+
+    public Playlist? CreatePlaylist(string name)
+    {
+        var id = DatabaseService.Instance.CreatePlaylist(name);
+        if (id <= 0) return null;
+        RefreshPlaylists();
+        return Playlists.FirstOrDefault(p => p.Id == id);
+    }
+
+    public void RenamePlaylist(Playlist? playlist, string newName)
+    {
+        if (playlist == null || string.IsNullOrWhiteSpace(newName)) return;
+        DatabaseService.Instance.RenamePlaylist(playlist.Id, newName);
+        playlist.Name = newName.Trim();
+    }
+
+    public void DeletePlaylist(Playlist? playlist)
+    {
+        if (playlist == null) return;
+        DatabaseService.Instance.DeletePlaylist(playlist.Id);
+        if (_currentPlaylistId == playlist.Id)
+        {
+            _currentPlaylistId = null;
+            _shuffleOrder = null;
+            OnPropertyChanged(nameof(IsPlaylistView));
+            MusicFiles.Clear();
+        }
+        Playlists.Remove(playlist);
+    }
+
+    /// <summary>Loads a playlist's tracks into the grid/queue (cache read; no filesystem scan).</summary>
+    public void LoadPlaylist(Playlist? playlist)
+    {
+        if (playlist == null) return;
+
+        _loadingCts?.Cancel();
+        _loadingCts = new CancellationTokenSource();
+
+        // Suppress write-back while we apply the saved state, otherwise restoring the
+        // mode would overwrite last_full_path with whatever was playing before.
+        _suppressPlaylistPersist = true;
+
+        _currentPlaylistId = playlist.Id;
+        _shuffleOrder = null;
+        OnPropertyChanged(nameof(IsPlaylistView));
+
+        CurrentFolderPath = playlist.Name;
+        MusicFiles.Clear();
+        AlbumCover = null;
+
+        foreach (var f in DatabaseService.Instance.GetPlaylistFiles(playlist.Id))
+        {
+            HookFile(f);
+            MusicFiles.Add(f);
+        }
+
+        // Restore saved shuffle/repeat mode and the last-played track.
+        ShuffleEnabled = playlist.Shuffle;
+        Repeat = (RepeatMode)playlist.Repeat;
+
+        SelectedFile = (string.IsNullOrEmpty(playlist.LastFullPath)
+            ? null
+            : MusicFiles.FirstOrDefault(f =>
+                string.Equals(f.FullPath, playlist.LastFullPath, StringComparison.OrdinalIgnoreCase)))
+            ?? MusicFiles.FirstOrDefault();
+
+        _suppressPlaylistPersist = false;
+    }
+
+    // Writes the current playback state (shuffle/repeat + last track) to the open playlist.
+    // No-op outside playlist view or while a playlist is being restored.
+    private void PersistPlaylistState()
+    {
+        if (_suppressPlaylistPersist || _currentPlaylistId == null) return;
+        DatabaseService.Instance.SavePlaylistState(
+            _currentPlaylistId.Value, _shuffleEnabled, (int)_repeat, NowPlaying?.FullPath);
+
+        // Keep the in-memory Playlist in sync so reopening it this session restores correctly.
+        var p = Playlists.FirstOrDefault(x => x.Id == _currentPlaylistId.Value);
+        if (p != null)
+        {
+            p.Shuffle = _shuffleEnabled;
+            p.Repeat = (int)_repeat;
+            p.LastFullPath = NowPlaying?.FullPath;
+        }
+    }
+
+    private void ReloadCurrentPlaylist()
+    {
+        if (_currentPlaylistId == null) return;
+        MusicFiles.Clear();
+        foreach (var f in DatabaseService.Instance.GetPlaylistFiles(_currentPlaylistId.Value))
+        {
+            HookFile(f);
+            MusicFiles.Add(f);
+        }
+        _shuffleOrder = null;
+    }
+
+    public void AddFilesToPlaylist(int playlistId, IEnumerable<string> paths)
+    {
+        var list = paths.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+        if (list.Count == 0) return;
+        DatabaseService.Instance.AddToPlaylist(playlistId, list);
+        UpdatePlaylistCount(playlistId);
+        if (playlistId == _currentPlaylistId) ReloadCurrentPlaylist();
+    }
+
+    /// <summary>Adds every supported music file under <paramref name="folderPath"/> (recursively,
+    /// including subfolders) to the playlist. Enumeration runs off the UI thread.</summary>
+    public async Task AddFolderToPlaylistAsync(int playlistId, string folderPath)
+    {
+        var paths = await Task.Run(() =>
+        {
+            try
+            {
+                return Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)
+                    .Where(MusicMetadataService.IsSupportedFile)
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch { return new List<string>(); }
+        });
+        AddFilesToPlaylist(playlistId, paths);
+    }
+
+    public void RemoveFromCurrentPlaylist(IEnumerable<MusicFile> files)
+    {
+        if (_currentPlaylistId == null) return;
+        var list = files.Where(f => f.PlaylistEntryId != null).ToList();
+        if (list.Count == 0) return;
+
+        DatabaseService.Instance.RemoveFromPlaylist(
+            _currentPlaylistId.Value, list.Select(f => f.PlaylistEntryId!.Value));
+        foreach (var f in list) MusicFiles.Remove(f);
+        _shuffleOrder = null;
+        UpdatePlaylistCount(_currentPlaylistId.Value);
+    }
+
+    public void MoveEntry(MusicFile? file, int delta)
+    {
+        if (_currentPlaylistId == null || file == null) return;
+        int idx = MusicFiles.IndexOf(file);
+        int dest = idx + delta;
+        if (idx < 0 || dest < 0 || dest >= MusicFiles.Count) return;
+
+        MusicFiles.Move(idx, dest);
+        _shuffleOrder = null;
+        DatabaseService.Instance.ReorderPlaylist(
+            _currentPlaylistId.Value,
+            MusicFiles.Where(f => f.PlaylistEntryId != null)
+                      .Select(f => f.PlaylistEntryId!.Value).ToList());
+    }
+
+    private void UpdatePlaylistCount(int id)
+    {
+        try
+        {
+            var existing = Playlists.FirstOrDefault(p => p.Id == id);
+            var fresh = DatabaseService.Instance.GetPlaylists().FirstOrDefault(p => p.Id == id);
+            if (existing != null && fresh != null) existing.TrackCount = fresh.TrackCount;
+        }
+        catch { }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
+        _controlApi.Dispose();
         _audioPlayer.PositionChanged -= OnPositionChanged;
         _audioPlayer.PlaybackStopped -= OnPlaybackStopped;
         _audioPlayer.Dispose();
         LibraryCacheService.Instance.Stop();
     }
+}
+
+public enum RepeatMode
+{
+    Off,
+    All,
+    One
 }
 
 public class RecentPlayedFolderItem

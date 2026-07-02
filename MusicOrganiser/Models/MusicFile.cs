@@ -37,6 +37,10 @@ public class MusicFile : INotifyPropertyChanged
     public long FileSize { get; set; }
     public DateTime FileModifiedUtc { get; set; }
 
+    // Set only when this row is served as part of a playlist; identifies the
+    // playlist_entries row so it can be removed/reordered. Null for folder views.
+    public int? PlaylistEntryId { get; set; }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? name = null)

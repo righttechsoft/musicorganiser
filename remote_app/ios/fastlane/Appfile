@@ -1,0 +1,6 @@
+# Primary app bundle id. The watch app id is added in the Matchfile / Fastfile.
+app_identifier("com.righttechsoft.musicOrganiserRemote")
+
+# Not needed when using an App Store Connect API key (see Fastfile), left here for reference.
+# apple_id("you@example.com")
+# team_id("YOURTEAMID")

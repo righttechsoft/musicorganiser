@@ -43,8 +43,10 @@
             <ColumnDefinition Width="3*"/>
         </Grid.ColumnDefinitions>
 
-        <!-- Left Panel: Folder Tree with Filter -->
-        <Grid Grid.Column="0">
+        <!-- Left Panel: Folders + Playlists tabs -->
+        <TabControl Grid.Column="0">
+        <TabItem Header="Folders">
+        <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
@@ -53,8 +55,8 @@
             <TreeView x:Name="FolderTreeView" Grid.Row="0"
                       ItemsSource="{Binding FolderTree.RootNodes}"
                       SelectedItemChanged="FolderTreeView_SelectedItemChanged"
-                      VirtualizingStackPanel.IsVirtualizing="True"
-                      VirtualizingStackPanel.VirtualizationMode="Recycling">
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                      VirtualizingStackPanel.IsVirtualizing="False">
                 <TreeView.ItemContainerStyle>
                     <Style TargetType="TreeViewItem">
                         <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
@@ -66,6 +68,23 @@
                 <TreeView.ItemTemplate>
                     <HierarchicalDataTemplate ItemsSource="{Binding Children}">
                         <StackPanel x:Name="FolderRow" Orientation="Horizontal" Background="Transparent">
+                            <Button Content="&#x25B6;" FontSize="10" Padding="3,0" Margin="0,0,2,0"
+                                    VerticalAlignment="Center" Cursor="Hand" Background="Transparent"
+                                    BorderThickness="0" Foreground="#2E7D32"
+                                    ToolTip="Play this folder and all subfolders"
+                                    Command="{Binding DataContext.PlayFolderCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Visibility" Value="Hidden"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, ElementName=FolderRow}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
                             <TextBlock Text="{Binding Name}" Padding="2" VerticalAlignment="Center">
                                 <TextBlock.FontWeight>
                                     <MultiBinding Converter="{StaticResource PlayingFolderFontWeightConverter}">
@@ -126,6 +145,8 @@
                         <MenuItem x:Name="FolderCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FolderMoveToMenu" Header="Move To"/>
                         <Separator/>
+                        <MenuItem x:Name="FolderAddToPlaylistMenu" Header="Add Folder to Playlist"/>
+                        <Separator/>
                         <MenuItem Header="Delete" Click="FolderDelete_Click"/>
                     </ContextMenu>
                 </TreeView.ContextMenu>
@@ -149,6 +170,55 @@
                 </Grid>
             </Border>
         </Grid>
+        </TabItem>
+
+        <!-- Playlists Tab -->
+        <TabItem Header="Playlists">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Button Grid.Row="0" Content="+ New Playlist" Margin="5" Padding="4"
+                        Click="NewPlaylist_Click"/>
+
+                <ListBox x:Name="PlaylistListBox" Grid.Row="1"
+                         ItemsSource="{Binding Playlists}"
+                         SelectedItem="{Binding SelectedPlaylist, Mode=TwoWay}"
+                         SelectionChanged="PlaylistListBox_SelectionChanged"
+                         HorizontalContentAlignment="Stretch">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <EventSetter Event="PreviewMouseRightButtonDown" Handler="PlaylistItem_PreviewMouseRightButtonDown"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="2">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{Binding Name}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Grid.Column="1" Text="{Binding TrackCount}"
+                                           VerticalAlignment="Center"
+                                           Foreground="#999999" FontSize="11" Margin="6,0,2,0"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                    <ListBox.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Rename" Click="PlaylistRename_Click"/>
+                            <MenuItem Header="Delete" Click="PlaylistDelete_Click"/>
+                        </ContextMenu>
+                    </ListBox.ContextMenu>
+                </ListBox>
+            </Grid>
+        </TabItem>
+        </TabControl>
 
         <!-- Splitter -->
         <GridSplitter Grid.Column="1" Width="3" HorizontalAlignment="Stretch" Background="LightGray"/>
@@ -204,7 +274,8 @@
             </Border>
 
             <!-- Music Files Grid (with album cover behind) -->
-            <Grid Grid.Row="1" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged">
+            <Grid Grid.Row="1" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged"
+                  MouseLeftButtonUp="CoverHost_MouseLeftButtonUp">
             <!-- Album Cover (behind the file list) -->
             <Image x:Name="AlbumCoverImage"
                    Source="{Binding AlbumCover}"
@@ -312,14 +383,35 @@
                     </DataGridTemplateColumn>
                 </DataGrid.Columns>
                 <DataGrid.ContextMenu>
-                    <ContextMenu x:Name="FileContextMenu" Opened="FileContextMenu_Opened">
+                    <ContextMenu x:Name="FileContextMenu" Opened="FileContextMenu_Opened"
+                                 DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                         <MenuItem x:Name="FileCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FileMoveToMenu" Header="Move To"/>
+                        <Separator/>
+                        <MenuItem x:Name="FileAddToPlaylistMenu" Header="Add to Playlist"/>
+                        <MenuItem Header="New Playlist from Selection" Click="NewPlaylistFromSelection_Click"/>
+                        <Separator/>
+                        <MenuItem Header="Remove from Playlist" Click="RemoveFromPlaylist_Click"
+                                  IsEnabled="{Binding IsPlaylistView}"/>
+                        <MenuItem Header="Move Up" Click="MoveEntryUp_Click"
+                                  IsEnabled="{Binding IsPlaylistView}"/>
+                        <MenuItem Header="Move Down" Click="MoveEntryDown_Click"
+                                  IsEnabled="{Binding IsPlaylistView}"/>
                         <Separator/>
                         <MenuItem Header="Delete" Click="FileDelete_Click"/>
                     </ContextMenu>
                 </DataGrid.ContextMenu>
             </DataGrid>
+
+            <!-- Loading overlay -->
+            <Border Background="#80FFFFFF" IsHitTestVisible="False"
+                    Visibility="{Binding IsLoadingFiles, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <ProgressBar IsIndeterminate="True" Width="180" Height="6"/>
+                    <TextBlock Text="Loading files…" HorizontalAlignment="Center"
+                               Margin="0,8,0,0" Foreground="#555555"/>
+                </StackPanel>
+            </Border>
             </Grid>
 
             <!-- Audio Player Control -->
@@ -373,6 +465,17 @@
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                                <Button Command="{Binding ToggleShuffleCommand}" ToolTip="Shuffle" Content="&#x1F500;">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ShuffleEnabled}" Value="True">
+                                                    <Setter Property="Background" Value="#90CAF9"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                                 <Button Content="&#9664;&#9664;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding PreviousCommand}" ToolTip="Previous"/>
                                 <Button Style="{StaticResource PlayerButtonStyle}"
@@ -396,6 +499,20 @@
                                         Command="{Binding StopCommand}" ToolTip="Stop"/>
                                 <Button Content="&#9654;&#9654;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding NextCommand}" ToolTip="Next"/>
+                                <Button Command="{Binding CycleRepeatCommand}" ToolTip="Repeat"
+                                        Content="{Binding RepeatGlyph}">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Setter Property="Foreground" Value="#BBBBBB"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding RepeatActive}" Value="True">
+                                                    <Setter Property="Background" Value="#90CAF9"/>
+                                                    <Setter Property="Foreground" Value="Black"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                             </StackPanel>
 
                             <!-- Volume Control -->
@@ -407,7 +524,9 @@
                                              Value="{Binding Volume, Mode=OneWay}"
                                              Cursor="Hand"
                                              ToolTip="Volume"
-                                             MouseLeftButtonDown="VolumeBar_MouseLeftButtonDown"/>
+                                             MouseLeftButtonDown="VolumeBar_MouseLeftButtonDown"
+                                             MouseMove="VolumeBar_MouseMove"
+                                             MouseLeftButtonUp="VolumeBar_MouseLeftButtonUp"/>
                             </StackPanel>
                         </Grid>
                     </Grid>
@@ -436,5 +555,13 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- Album cover zoom overlay: click cover to enlarge, click anywhere to dismiss -->
+        <Border x:Name="CoverZoomOverlay" Grid.Column="0" Grid.ColumnSpan="3"
+                Background="#E6101010" Visibility="Collapsed" Cursor="Hand"
+                MouseLeftButtonUp="CoverZoomOverlay_MouseLeftButtonUp">
+            <Image Source="{Binding AlbumCover}" Stretch="Uniform" Margin="20"
+                   RenderOptions.BitmapScalingMode="HighQuality"/>
+        </Border>
     </Grid>
 </Window>
