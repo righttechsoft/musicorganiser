@@ -3,7 +3,8 @@ default_platform(:ios)
 # Bundle ids that ship in the archive. Phone-only for now; add the watch id once its
 # target exists in the Xcode project. Keep in sync with Matchfile + ExportOptions.plist.
 APP_IDS = [
-  "com.righttechsoft.musicOrganiserRemote"
+  "com.righttechsoft.musicOrganiserRemote",
+  "com.righttechsoft.musicOrganiserRemote.watchkitapp"
 ].freeze
 
 platform :ios do
@@ -49,6 +50,17 @@ platform :ios do
       bundle_identifier: "com.righttechsoft.musicOrganiserRemote",
       profile_name: "match AppStore com.righttechsoft.musicOrganiserRemote",
       targets: ["Runner"]
+    )
+
+    # Same, for the watchOS app target (must match the target name in Runner.xcodeproj).
+    update_code_signing_settings(
+      path: File.expand_path("../Runner.xcodeproj", fastlane_dir),
+      use_automatic_signing: false,
+      team_id: "CRRN9GCAL9",
+      code_sign_identity: "Apple Distribution",
+      bundle_identifier: "com.righttechsoft.musicOrganiserRemote.watchkitapp",
+      profile_name: "match AppStore com.righttechsoft.musicOrganiserRemote.watchkitapp",
+      targets: ["Watch App"]
     )
 
     sh("cd '#{project_dir}' && flutter build ipa --release " \

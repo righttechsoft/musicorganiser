@@ -17,6 +17,8 @@
     <dict>
         <key>com.righttechsoft.musicOrganiserRemote</key>
         <string>match AppStore com.righttechsoft.musicOrganiserRemote</string>
+        <key>com.righttechsoft.musicOrganiserRemote.watchkitapp</key>
+        <string>match AppStore com.righttechsoft.musicOrganiserRemote.watchkitapp</string>
     </dict>
     <key>uploadSymbols</key>
     <true/>

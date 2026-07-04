@@ -6,5 +6,7 @@ storage_mode("git")
 type("appstore")
 
 # Every bundle id that ships in the build must be listed so match makes a profile for each.
-# Phone-only for now; add "…​.watchkitapp" here once the watch target exists in Xcode.
-app_identifier(["com.righttechsoft.musicOrganiserRemote"])
+app_identifier([
+  "com.righttechsoft.musicOrganiserRemote",
+  "com.righttechsoft.musicOrganiserRemote.watchkitapp"
+])
