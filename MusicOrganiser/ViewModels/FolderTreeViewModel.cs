@@ -264,25 +264,19 @@ public class FolderNode : ViewModelBase
         };
     }
 
-    private async Task AddChildNodeAsync(string dir, FolderRecord? record = null)
+    // Builds a child node off the visual tree (safe on any thread — it isn't bound yet).
+    private FolderNode MakeChildNode(string dir, FolderRecord? record)
     {
-        var currentFilter = _filterText;
-        var currentSort = _sortOption;
-        await Application.Current.Dispatcher.InvokeAsync(
-            () =>
-            {
-                var node = new FolderNode(dir)
-                {
-                    Parent = this,
-                    FilterText = currentFilter,
-                    SortOption = currentSort
-                };
-                if (record != null)
-                    node.ApplyCache(record.Rating, record.Tags);
-                node.EnablePersist();
-                Children.Add(node);
-            },
-            System.Windows.Threading.DispatcherPriority.Background);
+        var node = new FolderNode(dir)
+        {
+            Parent = this,
+            FilterText = _filterText,
+            SortOption = _sortOption
+        };
+        if (record != null)
+            node.ApplyCache(record.Rating, record.Tags);
+        node.EnablePersist();
+        return node;
     }
 
     public async Task EnsureLoadedAsync()
@@ -304,9 +298,8 @@ public class FolderNode : ViewModelBase
 
         try
         {
-            await Application.Current.Dispatcher.InvokeAsync(() => Children.Clear());
-
-            // 1. Cache-first: build nodes from the SQLite cache immediately.
+            // 1. Cache-first: build ALL nodes from the SQLite cache, then add them in a
+            // SINGLE UI-thread batch (one layout pass) instead of one dispatch per node.
             List<FolderRecord> cachedRecords;
             try { cachedRecords = DatabaseService.Instance.GetChildFolders(FullPath).ToList(); }
             catch { cachedRecords = new List<FolderRecord>(); }
@@ -316,14 +309,19 @@ public class FolderNode : ViewModelBase
                 cachedByPath[rec.FullPath] = rec;
             var cachedPaths = cachedRecords.Select(c => c.FullPath).ToList();
 
-            if (cachedRecords.Count > 0)
-            {
-                foreach (var dir in SortDirectories(cachedPaths))
-                    await AddChildNodeAsync(dir, cachedByPath.TryGetValue(dir, out var rec) ? rec : null);
-            }
+            var cacheNodes = SortDirectories(cachedPaths)
+                .Select(dir => MakeChildNode(dir, cachedByPath.TryGetValue(dir, out var rec) ? rec : null))
+                .ToList();
 
-            // 2. Filesystem refresh: enumerate, upsert the cache, and diff against the nodes.
-            await Task.Run(async () =>
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                Children.Clear();
+                foreach (var n in cacheNodes) Children.Add(n);
+            });
+
+            // 2. Filesystem refresh: enumerate + diff off-thread, then apply adds/removes in
+            // ONE UI-thread batch.
+            await Task.Run(() =>
             {
                 try
                 {
@@ -348,35 +346,28 @@ public class FolderNode : ViewModelBase
                         LibraryCacheService.Instance.Enqueue(dir);
 
                     var onDisk = new HashSet<string>(allDirs, StringComparer.OrdinalIgnoreCase);
+                    var cachedSet = new HashSet<string>(cachedPaths, StringComparer.OrdinalIgnoreCase);
 
-                    // Remove cached nodes whose folder no longer exists on disk.
-                    foreach (var gone in cachedPaths.Where(p => !onDisk.Contains(p)).ToList())
+                    var gone = new HashSet<string>(
+                        cachedPaths.Where(p => !onDisk.Contains(p)), StringComparer.OrdinalIgnoreCase);
+                    foreach (var g in gone) { try { DatabaseService.Instance.MarkFolderDeleted(g); } catch { } }
+
+                    // Nodes for folders not already shown from cache (built off the UI thread).
+                    var newNodes = SortDirectories(allDirs.Where(d => !cachedSet.Contains(d)).ToList())
+                        .Select(d => MakeChildNode(d, null))
+                        .ToList();
+
+                    if (gone.Count > 0 || newNodes.Count > 0)
                     {
-                        try { DatabaseService.Instance.MarkFolderDeleted(gone); } catch { }
-                        await Application.Current.Dispatcher.InvokeAsync(() =>
+                        Application.Current.Dispatcher.Invoke(() =>
                         {
-                            var node = Children.FirstOrDefault(c =>
-                                !c._isDummy && string.Equals(c.FullPath, gone, StringComparison.OrdinalIgnoreCase));
-                            if (node != null) Children.Remove(node);
+                            foreach (var node in Children
+                                .Where(c => !c._isDummy && gone.Contains(c.FullPath)).ToList())
+                                Children.Remove(node);
+                            foreach (var n in newNodes) Children.Add(n);
+                            if (Children.Count > 0 && !Children[0]._isDummy) ResortChildren();
                         });
                     }
-
-                    // Add nodes for folders not already shown from cache.
-                    foreach (var dir in SortDirectories(allDirs))
-                    {
-                        bool exists = await Application.Current.Dispatcher.InvokeAsync(() =>
-                            Children.Any(c => !c._isDummy &&
-                                string.Equals(c.FullPath, dir, StringComparison.OrdinalIgnoreCase)));
-                        if (!exists)
-                            await AddChildNodeAsync(dir);
-                    }
-
-                    // Restore sort order after any cache/disk merge.
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        if (Children.Count > 0 && !Children[0]._isDummy)
-                            ResortChildren();
-                    });
                 }
                 catch
                 {

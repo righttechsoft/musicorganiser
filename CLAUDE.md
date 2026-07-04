@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Music Organiser is a Windows desktop application for managing music files, built with C# WPF (.NET 8). It provides a file browser with filtering and sorting, music metadata display, audio playback with seeking and volume control, and file operations (copy/move/delete).
+Music Organiser is a Windows desktop application for managing music files, built with C# WPF (.NET 8). It provides a file browser with filtering and sorting, music metadata display, audio playback (WASAPI) with seeking, output-device selection and volume control, and file operations (copy/move/delete).
+
+The desktop also hosts a local HTTP control API (`ControlApiService`, port 8787) driven by a companion **Flutter mobile remote app** in `remote_app/` (see "Mobile remote app" below). The mobile app can control playback, stream audio to the phone ("This device" output), and download tracks for a **pure offline mode**.
 
 ## Build Commands
 
@@ -37,7 +39,11 @@ MusicOrganiser/
 
 ### Key Services
 
-- **AudioPlayerService** (`Services/AudioPlayerService.cs`): NAudio-based audio playback with position tracking and volume control. Critical method `StopAndReleaseFile()` must be called before move/delete operations to release file handles.
+- **AudioPlayerService** (`Services/AudioPlayerService.cs`): NAudio-based audio playback. Pipeline `AudioFileReader → MediaFoundationResampler → WasapiOut` on a selected **CoreAudio** render device. Exposes: in-app `Volume` (`AudioFileReader.Volume`), Windows master **`SystemVolume`** (`MMDevice.AudioEndpointVolume`), output-device selection (`OutputDeviceId`, `GetOutputDevices()`), and `LocalMuted` (silences local output while the phone is the audio sink — see remote-sink streaming). Live-tracks device add/remove/default-change (`IMMNotificationClient` → `DevicesChanged`) and external master-volume changes (`OnVolumeNotification` → `SystemVolumeChanged`); a removed selected device falls back to default. Critical method `StopAndReleaseFile()` must be called before move/delete operations to release file handles.
+
+- **AudioStreamService** (`Services/AudioStreamService.cs`): Transcodes tracks to **AAC (`.m4a`)** via `MediaFoundationEncoder` for the mobile app to stream/download. Cache keyed by `path + mtime + bitrate` under `%TEMP%\MusicOrganiser\stream` (cleared on `ControlApiService.Start`), per-key lock, `Prewarm()` fire-and-forget. Bitrates snapped to `{96, 128, 160, 192}k`. Reuses `AudioFileReader` so anything that plays transcodes.
+
+- **ControlApiService** (`Services/ControlApiService.cs`): Local `HttpListener` HTTP API on port **8787** (binds all interfaces, no auth) for the Flutter remote. Fire-and-forget per request; all state access marshalled onto the UI thread (`OnUi`). Key routes: `GET /status`, `POST /playback/{playpause,stop,next,previous,shuffle,repeat,seek}`, `POST /volume` · `/system-volume`, `GET /devices` · `POST /device` (id `"__this_device__"` = remote-sink mode), `GET /browse` · `/files` · `/search?q=&limit=` (global library search over the SQLite cache) · `/playlist/files`, `GET /file/art` (embedded cover), `GET /file/audio?path=&bitrate=` (transcoded AAC, **Range/206**, Content-Length always set), `/playlist/*`, `/history`, file/folder rating/tags/move/delete. Serves an embedded PWA on the fallback route. Started in the `MainViewModel` constructor.
 
 - **FileOperationsService** (`Services/FileOperationsService.cs`): Handles copy/move/delete for files and folders. Automatically stops the audio player when operating on currently playing files.
 
@@ -56,9 +62,9 @@ MusicOrganiser/
 
 ### Key ViewModels
 
-- **MainViewModel** (`ViewModels/MainViewModel.cs`): Central state management for the application, owns all services and coordinates between folder tree, music grid, and audio player.
+- **MainViewModel** (`ViewModels/MainViewModel.cs`): Central state management for the application, owns all services and coordinates between folder tree, music grid, and audio player. Exposes `Volume`, `SystemVolume`, `OutputDevices`/`SelectedOutputDevice` (record `Models/OutputDeviceItem`), and `RemoteSink` (phone is the audio sink). Subscribes to `AudioPlayerService` events and marshals device/volume changes to the UI thread.
 
-- **FolderTreeViewModel** (`ViewModels/FolderTreeViewModel.cs`): Manages folder tree with lazy-loading expansion, filtering, and sorting via `FolderNode` class.
+- **FolderTreeViewModel** (`ViewModels/FolderTreeViewModel.cs`): Manages folder tree with lazy-loading expansion, filtering, and sorting via `FolderNode` class. `LoadChildrenAsync` batches cache-node adds into a single UI dispatch (cache pass + disk-diff pass) for near-instant rendering; `NavigateToPathAsync` expands the ancestor chain and selects the target.
 
 ### Important Patterns
 
@@ -80,13 +86,36 @@ MusicOrganiser/
 
 9. **Ratings & Tags**: 1–5 star rating and comma-separated tags for tracks (`MusicFile`, `INotifyPropertyChanged`) and folders (`FolderNode`). UI via the reusable `Controls/StarRating` control + an inline tags box; both reveal on row hover (`StarRating.EditMode` / visibility triggers bound to row `IsMouseOver`). Edits write through to `DatabaseService` (`SetFileRating`/`SetFileTags`, `SetFolderRating`/`SetFolderTags`). Folder edits self-create the DB row via `EnsureFolderRow`; `FolderNode` guards write-back during cache load with `ApplyCache`/`EnablePersist`.
 
+10. **Output device & system volume**: The transport bar has a device `ComboBox` (bound to `OutputDevices`/`SelectedOutputDevice`), an in-app volume bar, and a Windows-master (`SystemVolume`) bar. The master bar reflects external volume changes live (CoreAudio `OnVolumeNotification`); the device list updates live on Bluetooth/USB connect/disconnect (`IMMNotificationClient`). The selected device id is persisted in `settings.json` (`OutputDeviceId`); the master volume is a live OS value and is not persisted.
+
+11. **Remote-sink streaming**: When the mobile app selects "This device", `POST /device {id:"__this_device__"}` sets `MainViewModel.RemoteSink` → `AudioPlayerService.LocalMuted = true` (desktop plays silently but keeps the queue/position clock and auto-advance). The phone streams the current track's transcoded AAC (`/file/audio`, prewarmed for the current + next track) and follows `/status`. `/status.outputDeviceId` reports `"__this_device__"` while active.
+
+12. **Player buttons**: Transport buttons use a flat circular `PlayerButtonStyle` (`MainWindow.xaml` resources); play/pause is a larger accent-filled `PlayerPlayButtonStyle`. Shuffle/repeat grey when off, black-on-blue-circle when on (via `DataTrigger` on `Background`; the template `TemplateBinding`s `Background` so the triggers apply).
+
+## Mobile remote app (`remote_app/`)
+
+A Flutter app (package `music_organiser_remote`) that controls the desktop over the LAN HTTP API. Ships to iOS TestFlight via `.github/workflows/ios-testflight.yml` (tag `v*`). Plain state via `ChangeNotifier` + `ListenableBuilder` — no Provider/Bloc.
+
+- **`lib/app_state.dart`** — `AppState`: connection lifecycle, 1s `/status` poll, `ApiClient`, and the local `just_audio` player used for "This device" streaming (`_syncLocal` slaves the phone to `/status`: load on track change, mirror play/pause, resync on drift, retry failed loads). Owns the offline sub-services.
+- **`lib/api_client.dart`** — thin `http` wrapper over the desktop API; `streamUrl(path,bitrate)` / `artUrl(path)`.
+- **Screens** (`lib/screens/`): Now Playing, Library (browse + search + 6-option sort mirroring the desktop, `lib/sort_utils.dart`), Playlists, History, and **Downloads** (offline). Connect screen has a "Browse offline" entry.
+- **Streaming**: the output picker lists desktop devices plus **"This device"** — selecting it streams transcoded AAC to the phone (Low/Med/High = 96/160/192k, `streamBitrate` pref) and mutes the desktop.
+- **Offline mode** (`lib/offline/`): `OfflineStore` (JSON manifest at `<app-docs>/downloads/manifest.json`, mirrored desktop folder tree, path sanitization), `DownloadService` (serial download queue → `.part` → rename, progress/cancel/retry), `OfflinePlayer` (own `AudioPlayer`, local transport: next/prev/shuffle/repeat/auto-advance; mutually exclusive with remote-sink streaming). Download a track/folder/playlist from the ⋮ menus; browse + play with no desktop connection.
+
+Build/run: `cd remote_app && flutter run` (connect to `<desktop-LAN-ip>:8787`; use `10.0.2.2:8787` from an Android emulator).
+
 ## Dependencies
 
+### Desktop
 - **NAudio** (2.2.1): Audio playback and volume control
 - **TagLibSharp** (2.3.0): Audio metadata reading
 - **Microsoft.Data.Sqlite** (8.0.10): Local SQLite cache for files and folders
 - **Anthropic.SDK** (5.9.0): Claude AI API client for artist summaries
 - **DotNetEnv** (3.1.1): Environment variable loading from .env files
+- NAudio 2.2.1 (meta-package) also provides CoreAudio (`WasapiOut`, `MMDeviceEnumerator`, `AudioEndpointVolume`) and MediaFoundation (`MediaFoundationEncoder`/`Resampler`) — no extra packages needed for device selection, system volume, or AAC transcoding.
+
+### Mobile (`remote_app/pubspec.yaml`)
+- **http**, **shared_preferences**, **just_audio** (local playback / streaming), **path_provider** (offline downloads dir)
 
 ## Configuration
 

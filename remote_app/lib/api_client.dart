@@ -27,6 +27,16 @@ class ApiClient {
         .toList();
   }
 
+  // Global library search: matches title/artist/album/filename across every folder.
+  Future<List<TrackFile>> search(String query, {int limit = 300}) async {
+    final r = await http
+        .get(_u('/search', {'q': query, 'limit': '$limit'}))
+        .timeout(const Duration(seconds: 8));
+    return (jsonDecode(r.body) as List)
+        .map((e) => TrackFile.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   // open=true also navigates the desktop app's folder tree to [path].
   Future<BrowseResult> browse(String path, {bool open = false}) async {
     final q = {'path': path, if (open) 'open': '1'};

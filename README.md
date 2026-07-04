@@ -30,11 +30,19 @@ A Windows desktop application for managing and playing music files, built with C
 - Unchanged files are served from cache without re-parsing tags
 
 ### Audio Player
-- Play/Pause/Stop controls
+- Play/Pause/Stop controls, Shuffle and Repeat (off/all/one)
 - Previous/Next track navigation
 - Click-to-seek progress bar
-- Volume control
+- **Output device selection** — pick any Windows audio device (WASAPI/CoreAudio); the list updates live as Bluetooth/USB devices connect or disconnect
+- **In-app volume** and a **Windows system-volume** control (the system bar reflects volume changes made outside the app)
 - Auto-play next track when current track ends
+
+### Mobile Remote App
+A companion Flutter app (`remote_app/`) controls the desktop over your local network via a built-in HTTP API (port 8787):
+- Browse the library (search + sort), control playback, edit ratings/tags, manage playlists — all from your phone
+- **Stream to phone** — choose "This device" as the output to play the desktop's music on the phone (transcoded AAC, selectable quality) while the desktop stays silent
+- **Offline mode** — download tracks, folders or playlists to the phone (mirroring the desktop folder structure) and browse + play them with no connection to the desktop
+- No account or cloud — the phone connects directly to the desktop on the LAN (or over VPN)
 
 ### AI Artist Info Panel
 - AI-powered artist summaries using Claude with web search

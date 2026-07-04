@@ -304,12 +304,16 @@ public class MainViewModel : ViewModelBase, IDisposable
         _audioPlayer.OutputDeviceId = _appSettings.OutputDeviceId;
         OutputDevices = _audioPlayer.GetOutputDevices()
             .Select(d => new OutputDeviceItem(d.Id, d.Name)).ToList();
-        // Show the actual current device by default (saved one, else the system default).
+        // Show the actual current device by default (saved one, else the system default,
+        // else just the first active device so the box is never blank).
         var currentDeviceId = _audioPlayer.OutputDeviceId ?? _audioPlayer.GetDefaultDeviceId();
-        _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentDeviceId);
+        _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentDeviceId)
+            ?? OutputDevices.FirstOrDefault();
 
         _audioPlayer.PositionChanged += OnPositionChanged;
         _audioPlayer.PlaybackStopped += OnPlaybackStopped;
+        _audioPlayer.SystemVolumeChanged += OnSystemVolumeChanged;
+        _audioPlayer.DevicesChanged += OnDevicesChanged;
 
         PlayPauseCommand = new RelayCommand(PlayPause);
         StopCommand = new RelayCommand(Stop);
@@ -632,9 +636,15 @@ public class MainViewModel : ViewModelBase, IDisposable
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
 
-            // Phone is the sink: warm the transcode cache so its stream request is ready.
+            // Phone is the sink: warm the transcode cache for THIS track and the NEXT one,
+            // so the phone's stream request (and the upcoming track change) serve instantly.
             if (_remoteSink)
+            {
                 AudioStreamService.Prewarm(file.FullPath, _lastStreamBitrate);
+                var next = GetAdjacent(file, +1, _repeat == RepeatMode.All);
+                if (next != null)
+                    AudioStreamService.Prewarm(next.FullPath, _lastStreamBitrate);
+            }
 
             AddRecentPlayedFolder(Path.GetDirectoryName(file.FullPath));
             PersistPlaylistState();   // remember this as the playlist's last track
@@ -785,6 +795,32 @@ public class MainViewModel : ViewModelBase, IDisposable
             (order[i], order[j]) = (order[j], order[i]);
         }
         _shuffleOrder = order;
+    }
+
+    // OS master volume changed (possibly from outside the app) — refresh the bound bar.
+    // Fires on a COM thread; marshal to the UI thread.
+    private void OnSystemVolumeChanged()
+    {
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(() => OnPropertyChanged(nameof(SystemVolume)));
+    }
+
+    // Render devices added/removed (e.g. Bluetooth) — rebuild the picker list on the UI thread.
+    private void OnDevicesChanged()
+    {
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
+        {
+            OutputDevices = _audioPlayer.GetOutputDevices()
+                .Select(d => new OutputDeviceItem(d.Id, d.Name)).ToList();
+            OnPropertyChanged(nameof(OutputDevices));
+
+            // Re-resolve the shown selection (record equality keeps it if still present; else
+            // the service already fell back to default). Set the field directly — no re-persist/switch.
+            var currentId = _audioPlayer.OutputDeviceId ?? _audioPlayer.GetDefaultDeviceId();
+            _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentId)
+                ?? OutputDevices.FirstOrDefault();
+            OnPropertyChanged(nameof(SelectedOutputDevice));
+            OnPropertyChanged(nameof(SystemVolume)); // active endpoint may have changed
+        });
     }
 
     private void OnPositionChanged(object? sender, TimeSpan position)

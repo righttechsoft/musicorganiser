@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../api_client.dart';
+import '../app_state.dart';
 import '../models.dart';
 import '../theme.dart';
 import '../widgets.dart';
@@ -8,20 +9,22 @@ import 'playlists_screen.dart';
 /// Bottom sheet of actions for a track (⋮ / long-press). [onChanged] is called
 /// after any mutation so the caller can refresh its list. When [removeFromPlaylistId]
 /// is set (the track is shown inside a playlist), a "Remove from playlist" action appears.
+/// When [app] is provided, a Download / Re-download action appears.
 Future<void> showTrackActions(
   BuildContext context, {
   required TrackFile track,
   required ApiClient api,
   required Future<void> Function() onChanged,
   int? removeFromPlaylistId,
+  AppState? app,
 }) {
   return showModalBottomSheet(
     context: context,
     backgroundColor: AppColors.surface,
     shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-    builder: (sheetCtx) =>
-        _TrackActionsSheet(track: track, api: api, onChanged: onChanged, removeFromPlaylistId: removeFromPlaylistId),
+    builder: (sheetCtx) => _TrackActionsSheet(
+        track: track, api: api, onChanged: onChanged, removeFromPlaylistId: removeFromPlaylistId, app: app),
   );
 }
 
@@ -30,8 +33,9 @@ class _TrackActionsSheet extends StatefulWidget {
   final ApiClient api;
   final Future<void> Function() onChanged;
   final int? removeFromPlaylistId;
+  final AppState? app;
   const _TrackActionsSheet(
-      {required this.track, required this.api, required this.onChanged, this.removeFromPlaylistId});
+      {required this.track, required this.api, required this.onChanged, this.removeFromPlaylistId, this.app});
 
   @override
   State<_TrackActionsSheet> createState() => _TrackActionsSheetState();
@@ -44,7 +48,9 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
   Widget build(BuildContext context) {
     final t = widget.track;
     return SafeArea(
-      child: Column(
+      // Scrollable: with the Download action the sheet can exceed a small screen.
+      child: SingleChildScrollView(
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           const SizedBox(height: 10),
@@ -102,6 +108,15 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
             await showAddToPlaylist(context, widget.api, path: t.path);
             if (mounted) Navigator.pop(context);
           }),
+          if (widget.app != null)
+            _tile(
+                Icons.download_for_offline_outlined,
+                widget.app!.offline.has(t.path) ? 'Re-download' : 'Download',
+                AppColors.text, () {
+              widget.app!.downloads.enqueueTrack(t);
+              _toast(context, 'Added to downloads');
+              Navigator.pop(context);
+            }),
           if (widget.removeFromPlaylistId != null)
             _tile(Icons.playlist_remove, 'Remove from playlist', AppColors.text, () async {
               if (t.playlistEntryId != null) {
@@ -130,6 +145,7 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
           }),
           const SizedBox(height: 8),
         ],
+        ),
       ),
     );
   }

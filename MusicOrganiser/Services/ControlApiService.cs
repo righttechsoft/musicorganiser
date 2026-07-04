@@ -202,6 +202,13 @@ public class ControlApiService : IDisposable
             case ("GET", "/files"):
                 await WriteJson(ctx, OnUi(BuildFiles));
                 break;
+            case ("GET", "/search"):
+            {
+                var q = req.QueryString["q"] ?? "";
+                var limit = int.TryParse(req.QueryString["limit"], out var l) ? Math.Clamp(l, 1, 1000) : 300;
+                await WriteJson(ctx, BuildSearch(q, limit));
+                break;
+            }
             case ("POST", "/select"):
             {
                 var body = await ReadBody(req);
@@ -482,6 +489,24 @@ public class ControlApiService : IDisposable
         }).ToList();
     }
 
+    // Global library search (DB read across every folder). Same track shape as /files.
+    private object BuildSearch(string query, int limit)
+    {
+        var np = OnUi(() => _vm.NowPlaying);
+        var files = DatabaseService.Instance.SearchFiles(query, limit);
+        return files.Select(f => (object)new
+        {
+            path = f.FullPath,
+            title = f.Title,
+            artist = f.Artist,
+            album = f.Album,
+            durationSec = (int)f.Duration.TotalSeconds,
+            rating = f.Rating,
+            tags = f.Tags,
+            isPlaying = np != null && string.Equals(f.FullPath, np.FullPath, StringComparison.OrdinalIgnoreCase),
+        }).ToList();
+    }
+
     private static int? GetInt(JsonElement e, string name)
     {
         var n = GetNum(e, name);
@@ -533,7 +558,13 @@ public class ControlApiService : IDisposable
         }
 
         var folders = Directory.GetDirectories(path)
-            .Select(d => (object)new { name = Path.GetFileName(d), path = d })
+            .Select(d => (object)new
+            {
+                name = Path.GetFileName(d),
+                path = d,
+                createdSec = UnixOrNull(() => Directory.GetCreationTimeUtc(d)),
+                modifiedSec = UnixOrNull(() => Directory.GetLastWriteTimeUtc(d)),
+            })
             .ToList();
 
         IReadOnlyList<MusicFile> files;
@@ -550,10 +581,19 @@ public class ControlApiService : IDisposable
             durationSec = (int)f.Duration.TotalSeconds,
             rating = f.Rating,
             tags = f.Tags,
+            createdSec = UnixOrNull(() => File.GetCreationTimeUtc(f.FullPath)),
+            modifiedSec = UnixOrNull(() => File.GetLastWriteTimeUtc(f.FullPath)),
             isPlaying = np != null && string.Equals(f.FullPath, np.FullPath, StringComparison.OrdinalIgnoreCase),
         }).ToList();
 
         return new { path, folders, files = fileObjs };
+    }
+
+    // Unix seconds for a filesystem timestamp, or null on IO failure (sorts to the end on the client).
+    private static long? UnixOrNull(Func<DateTime> get)
+    {
+        try { return new DateTimeOffset(get()).ToUnixTimeSeconds(); }
+        catch { return null; }
     }
 
     // Play a track by full path. If it's already in the loaded queue, play it directly;

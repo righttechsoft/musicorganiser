@@ -5,6 +5,9 @@ import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'models.dart';
+import 'offline/download_service.dart';
+import 'offline/offline_player.dart';
+import 'offline/offline_store.dart';
 import 'watch_link.dart';
 
 enum ConnState { disconnected, connecting, connected, lost }
@@ -44,6 +47,39 @@ class AppState extends ChangeNotifier {
   bool localOutput = false;
   int streamBitrate = 160000;
   double localVolume = 100; // phone player volume (0..100) while in local output
+  bool _loadingTrack = false; // true while a stream load attempt is in flight
+  String? _loadedPath;        // track path currently loaded & playing on the phone
+  String? _pendingPath;       // path we're trying to load (to capture its start target once)
+  int _pendingTarget = 0;     // position to start the pending track at
+
+  // Offline mode: downloads store + serial download queue + local-file player.
+  late final OfflineStore offline;
+  late final DownloadService downloads;
+  late final OfflinePlayer offlinePlayer;
+
+  AppState() {
+    offline = OfflineStore();
+    downloads = DownloadService(offline, () => api, () => streamBitrate);
+    offlinePlayer = OfflinePlayer(offline);
+    offlinePlayer.onWillPlay = stopLocalPlayback;
+    // Proxy their changes so every existing ListenableBuilder(listenable: app)
+    // repaints without new wiring.
+    offline.addListener(notifyListeners);
+    downloads.addListener(notifyListeners);
+    offlinePlayer.addListener(notifyListeners);
+  }
+
+  Future<void> initOffline() => offline.init();
+
+  /// Stops the remote-sink ("This device") stream. localOutput=false is essential:
+  /// merely stopping _player would let the next 1s _syncLocal tick resume it.
+  void stopLocalPlayback() {
+    unawaited(_player.stop());
+    localOutput = false;
+    _loadedPath = null;
+    _pendingPath = null;
+    notifyListeners();
+  }
 
   // Set by History to ask the Library screen to navigate to a folder; consumed there.
   String? pendingLibraryPath;
@@ -151,6 +187,8 @@ class AppState extends ChangeNotifier {
     _byPath.clear();
     unawaited(_player.stop());
     localOutput = false; // session-only: next connect defaults to desktop output
+    _loadedPath = null;
+    _pendingPath = null;
     notifyListeners();
   }
 
@@ -158,15 +196,20 @@ class AppState extends ChangeNotifier {
 
   Future<void> enableLocalOutput() async {
     if (api == null) return;
+    await offlinePlayer.stop(); // mutual exclusion: offline playback yields to streaming
     localOutput = true;
+    _loadedPath = null; // force a fresh load of the current track
+    _pendingPath = null;
     notifyListeners();
     await api!.setDevice(kThisDevice); // desktop mutes + reports the sentinel
-    await _syncLocal(force: true);
+    await _syncLocal(); // trackChanged:false -> resume the current track at its position
   }
 
   Future<void> selectDesktopDevice(String id) async {
     localOutput = false;
     await _player.stop();
+    _loadedPath = null;
+    _pendingPath = null;
     notifyListeners();
     if (api != null) await api!.setDevice(id);
   }
@@ -182,24 +225,61 @@ class AppState extends ChangeNotifier {
     final pos = _player.position;
     try {
       await _player.setUrl(api!.streamUrl(np.path, bitrate));
+      if (!localOutput) return; // output switched away while reloading
       await _player.seek(pos);
+      if (!localOutput) return;
       if (status.isPlaying && !status.isPaused) _player.play();
     } catch (_) {/* buffering; next tick retries */}
   }
 
-  // Slaves the local player to the desktop's /status: load on track change, mirror
-  // play/pause, resync the playhead on drift.
-  Future<void> _syncLocal({bool force = false}) async {
+  // Slaves the local player to the desktop's /status: keeps the phone playing the current
+  // track, mirrors play/pause, and resyncs the playhead on drift. Loading is driven by
+  // "loaded path != current path" (NOT a one-shot flag), so a failed stream load — e.g. the
+  // transcode isn't ready yet, or an ExoPlayer timeout over VPN — is retried on the next
+  // tick instead of leaving playback stuck after one track.
+  // [trackChanged] only affects where a freshly-seen track starts: 0 vs the desktop position.
+  Future<void> _syncLocal({bool trackChanged = false}) async {
     if (!localOutput || api == null) return;
     final np = status.nowPlaying;
     if (np == null) {
       if (_player.playing) await _player.stop();
+      _loadedPath = null;
+      _pendingPath = null;
       return;
     }
-    try {
-      if (force) {
-        await _player.setUrl(api!.streamUrl(np.path, streamBitrate));
+
+    // Need to (re)load? Either a new track, or a previous load that failed.
+    if (np.path != _loadedPath) {
+      // Capture the intended start position the first time we see this path, so retries
+      // don't drift forward: a real track change starts at 0, an output switch resumes.
+      if (np.path != _pendingPath) {
+        _pendingPath = np.path;
+        _pendingTarget = trackChanged ? 0 : status.positionSec;
       }
+      if (_loadingTrack) return; // a load attempt is already in flight
+      _loadingTrack = true;
+      try {
+        await _player.setUrl(api!.streamUrl(np.path, streamBitrate));
+        // Re-check after every await: stopLocalPlayback/selectDesktopDevice/disconnect
+        // may have run while we were suspended — playing now would resurrect the
+        // stream on top of offline playback (or a desktop output).
+        if (!localOutput || api == null) return;
+        _loadedPath = np.path; // mark loaded ONLY on success
+        await api!.seek(_pendingTarget); // rewind the muted desktop clock to the start
+        if (!localOutput) return;
+        await _player.seek(Duration(seconds: _pendingTarget));
+        if (!localOutput) return;
+        if (status.isPlaying && !status.isPaused) _player.play();
+      } catch (_) {
+        // Transient failure — leave _loadedPath stale so the next tick retries this track.
+      } finally {
+        _loadingTrack = false;
+      }
+      return;
+    }
+
+    // Loaded & current: mirror play/pause + drift resync.
+    try {
       final shouldPlay = status.isPlaying && !status.isPaused;
       if (shouldPlay && !_player.playing) {
         _player.play();
@@ -208,7 +288,7 @@ class AppState extends ChangeNotifier {
       }
       final drift = (_player.position.inSeconds - status.positionSec).abs();
       if (drift > 2) await _player.seek(Duration(seconds: status.positionSec));
-    } catch (_) {/* buffering/offline; next tick retries */}
+    } catch (_) {/* transient; next tick retries */}
   }
 
   Future<void> setLocalVolume(double v) async {
@@ -221,6 +301,12 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _poll?.cancel();
     _player.dispose();
+    offline.removeListener(notifyListeners);
+    downloads.removeListener(notifyListeners);
+    offlinePlayer.removeListener(notifyListeners);
+    offlinePlayer.dispose();
+    downloads.dispose();
+    offline.dispose();
     super.dispose();
   }
 
@@ -239,7 +325,7 @@ class AppState extends ChangeNotifier {
       if (conn == ConnState.lost) conn = ConnState.connected;
       notifyListeners();
       if (trackChanged) unawaited(loadFiles());
-      unawaited(_syncLocal(force: trackChanged));
+      unawaited(_syncLocal(trackChanged: trackChanged));
     } catch (_) {
       if (conn == ConnState.connected) {
         conn = ConnState.lost;

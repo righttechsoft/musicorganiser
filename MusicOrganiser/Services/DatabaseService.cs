@@ -517,6 +517,51 @@ public sealed class DatabaseService
         return list;
     }
 
+    /// <summary>Global text search across the cached (non-deleted) library: every
+    /// whitespace-separated term must appear (AND) in file name/title/artist/album.
+    /// Ordered artist, album, title; capped at <paramref name="limit"/>.</summary>
+    public IReadOnlyList<MusicFile> SearchFiles(string query, int limit = 300)
+    {
+        var list = new List<MusicFile>();
+        if (!IsReady || string.IsNullOrWhiteSpace(query)) return list;
+        var terms = query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (terms.Length == 0) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            // '|' is the LIKE escape char (can't occur in the escaped term), so %/_ in a
+            // search term are matched literally rather than as wildcards.
+            var where = "";
+            for (var i = 0; i < terms.Length; i++)
+            {
+                var t = terms[i].Replace("|", "||").Replace("%", "|%").Replace("_", "|_");
+                where += $" AND hay LIKE $t{i} ESCAPE '|'";
+                cmd.Parameters.AddWithValue($"$t{i}", "%" + t + "%");
+            }
+            cmd.CommandText = $@"
+                SELECT full_path, file_name, title, artist, album, genre, year,
+                       duration_ticks, bitrate, sample_rate, file_size, file_modified_utc, rating, tags
+                FROM (
+                    SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
+                           f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
+                           (SELECT group_concat(t2.name, ', ') FROM file_tags l2 JOIN tags t2 ON t2.id = l2.tag_id WHERE l2.file_id = f.id) AS tags,
+                           (f.file_name || ' ' || IFNULL(f.title,'') || ' ' || IFNULL(f.artist,'') || ' ' || IFNULL(f.album,'')) AS hay
+                    FROM files f
+                    WHERE f.is_deleted = 0
+                )
+                WHERE 1=1{where}
+                ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE
+                LIMIT $lim;";
+            cmd.Parameters.AddWithValue("$lim", limit);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(ReadFileRow(r));
+        }
+        catch { }
+        return list;
+    }
+
     public IReadOnlyList<FolderRecord> SearchFoldersByTag(string tag)
     {
         var list = new List<FolderRecord>();

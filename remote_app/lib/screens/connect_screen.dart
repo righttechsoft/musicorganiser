@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../app_state.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'downloads_screen.dart';
 
 class ConnectScreen extends StatefulWidget {
   final AppState app;
@@ -137,6 +138,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [Text('Connect'), SizedBox(width: 8), Icon(Icons.arrow_forward, size: 18)],
                             ),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => DownloadsScreen(app: app, standalone: true))),
+                      style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: AppColors.line),
+                          padding: const EdgeInsets.symmetric(vertical: 14)),
+                      icon: const Icon(Icons.download_for_offline_outlined, size: 18),
+                      label: const Text('Browse offline'),
                     ),
                     const SizedBox(height: 12),
                     if (connecting)

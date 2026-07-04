@@ -20,6 +20,7 @@ class _NowPlayingViewState extends State<NowPlayingView> {
   double? _volDrag;
   double? _sysVolDrag; // non-null while dragging the system-volume bar
   List<AudioDevice> _devices = [];
+  bool _outputExpanded = false; // collapse device + system volume + quality by default
 
   AppState get app => widget.app;
 
@@ -139,10 +140,19 @@ class _NowPlayingViewState extends State<NowPlayingView> {
             onPressed: () async {
               final np = app.status.nowPlaying;
               if (np == null || app.api == null) return;
-              final t = app.trackByPath(np.path);
-              if (t != null) {
-                await showTrackActions(context, track: t, api: app.api!, onChanged: app.loadFiles);
-              }
+              // Queue lookup gives rating/tags; fall back to a minimal TrackFile so the
+              // menu (incl. Download) still works when the queue list is stale.
+              final t = app.trackByPath(np.path) ??
+                  TrackFile(
+                      path: np.path,
+                      title: np.title,
+                      artist: np.artist,
+                      album: np.album,
+                      tags: '',
+                      durationSec: np.durationSec,
+                      rating: null,
+                      isPlaying: true);
+              await showTrackActions(context, track: t, api: app.api!, app: app, onChanged: app.loadFiles);
             },
             icon: const Icon(Icons.more_vert),
           ),
@@ -252,64 +262,94 @@ class _NowPlayingViewState extends State<NowPlayingView> {
           SizedBox(width: 30, child: Text('${vol.round()}', textAlign: TextAlign.right, style: AppText.mono)),
         ],
       ),
-      // System (Windows master) volume — desktop PC only; hidden while streaming to phone.
-      if (!app.localOutput) ...[
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            const Icon(Icons.computer, size: 20, color: AppColors.muted),
-            Expanded(
-              child: SliderTheme(
-                data: _sliderTheme(),
-                child: Slider(
-                  value: sysVol.clamp(0, 100),
-                  max: 100,
-                  onChanged: (v) => setState(() => _sysVolDrag = v),
-                  onChangeEnd: (v) async {
-                    await app.api!.setSystemVolume(v.round());
-                    setState(() => _sysVolDrag = null);
-                  },
-                ),
-              ),
-            ),
-            SizedBox(width: 30, child: Text('${sysVol.round()}', textAlign: TextAlign.right, style: AppText.mono)),
-          ],
-        ),
-      ],
-      const SizedBox(height: 8),
-      // Output device selector.
+      const SizedBox(height: 4),
+      // Collapsible output section: device + system volume + stream quality.
       InkWell(
-        onTap: _pickDevice,
+        onTap: () => setState(() => _outputExpanded = !_outputExpanded),
         borderRadius: BorderRadius.circular(10),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(vertical: 8),
           child: Row(
             children: [
-              const Icon(Icons.speaker_group_outlined, size: 20, color: AppColors.muted),
+              const Icon(Icons.tune, size: 20, color: AppColors.muted),
               const SizedBox(width: 8),
-              Expanded(
-                child: Text(_deviceName(s.outputDeviceId),
-                    maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.mono),
-              ),
-              const Icon(Icons.arrow_drop_down, color: AppColors.muted),
+              Text('Output', style: AppText.trackTitle.copyWith(fontSize: 14, color: AppColors.muted)),
+              const SizedBox(width: 12),
+              // Show the current device as a hint while collapsed.
+              if (!_outputExpanded)
+                Expanded(
+                  child: Text(_deviceName(s.outputDeviceId),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: AppText.mono.copyWith(color: AppColors.muted)),
+                )
+              else
+                const Spacer(),
+              const SizedBox(width: 4),
+              Icon(_outputExpanded ? Icons.expand_less : Icons.expand_more, color: AppColors.muted),
             ],
           ),
         ),
       ),
-      // Stream quality (only relevant when the phone is the sink).
-      if (app.localOutput) ...[
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            const Icon(Icons.high_quality_outlined, size: 20, color: AppColors.muted),
-            const SizedBox(width: 8),
-            for (final entry in kQualities.entries)
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _qualityChip(entry.key, entry.value),
+      if (_outputExpanded) ...[
+        // System (Windows master) volume — desktop PC only; hidden while streaming to phone.
+        if (!app.localOutput)
+          Row(
+            children: [
+              const Icon(Icons.computer, size: 20, color: AppColors.muted),
+              Expanded(
+                child: SliderTheme(
+                  data: _sliderTheme(),
+                  child: Slider(
+                    value: sysVol.clamp(0, 100),
+                    max: 100,
+                    onChanged: (v) => setState(() => _sysVolDrag = v),
+                    onChangeEnd: (v) async {
+                      await app.api!.setSystemVolume(v.round());
+                      setState(() => _sysVolDrag = null);
+                    },
+                  ),
+                ),
               ),
-          ],
+              SizedBox(width: 30, child: Text('${sysVol.round()}', textAlign: TextAlign.right, style: AppText.mono)),
+            ],
+          ),
+        const SizedBox(height: 4),
+        // Output device selector.
+        InkWell(
+          onTap: _pickDevice,
+          borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                const Icon(Icons.speaker_group_outlined, size: 20, color: AppColors.muted),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(_deviceName(s.outputDeviceId),
+                      maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.mono),
+                ),
+                const Icon(Icons.arrow_drop_down, color: AppColors.muted),
+              ],
+            ),
+          ),
         ),
+        // Stream quality (only relevant when the phone is the sink).
+        if (app.localOutput) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Icon(Icons.high_quality_outlined, size: 20, color: AppColors.muted),
+              const SizedBox(width: 8),
+              for (final entry in kQualities.entries)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: _qualityChip(entry.key, entry.value),
+                ),
+            ],
+          ),
+        ],
       ],
     ];
   }

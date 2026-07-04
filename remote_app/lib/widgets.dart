@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'api_client.dart';
 import 'app_state.dart';
@@ -9,21 +11,36 @@ Widget sectionLabel(String text) => Padding(
       child: Text(text.toUpperCase(), style: AppText.sectionLabel),
     );
 
-/// Album cover from the API, with a graceful "no album art" placeholder.
+/// Album cover from the API (or a local file for downloads), with a graceful
+/// "no album art" placeholder.
 class AlbumArt extends StatelessWidget {
   final String? url;
+  final File? file; // local downloaded art; takes precedence over [url]
   final double size;
   final bool big;
   final double radius;
   final bool expand; // fill the parent box instead of using [size]
   const AlbumArt(
-      {super.key, required this.url, this.size = 44, this.big = false, this.radius = 10, this.expand = false});
+      {super.key, this.url, this.file, this.size = 44, this.big = false, this.radius = 10, this.expand = false});
 
   @override
   Widget build(BuildContext context) {
     final ph = _placeholder();
-    if (url == null || url!.isEmpty) return ph;
     final w = expand ? double.infinity : size;
+    if (file != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: Image.file(
+          file!,
+          width: w,
+          height: w,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => ph,
+        ),
+      );
+    }
+    if (url == null || url!.isEmpty) return ph;
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: Image.network(
@@ -131,17 +148,21 @@ class TagChip extends StatelessWidget {
 /// A track row for the Files list. Highlights the now-playing track.
 class TrackRow extends StatelessWidget {
   final TrackFile track;
-  final ApiClient api;
+  final ApiClient? api; // null offline; only used to build the art URL
+  final File? artFile; // local downloaded art (Downloads screen)
   final VoidCallback onTap;
   final VoidCallback onMenu;
   final bool? playing; // live override; falls back to track.isPlaying
+  final bool downloaded; // shows a small "downloaded" badge
   const TrackRow(
       {super.key,
       required this.track,
       required this.api,
       required this.onTap,
       required this.onMenu,
-      this.playing});
+      this.playing,
+      this.artFile,
+      this.downloaded = false});
 
   @override
   Widget build(BuildContext context) {
@@ -168,7 +189,7 @@ class TrackRow extends StatelessWidget {
                         color: AppColors.accentTint, borderRadius: BorderRadius.circular(10)),
                     child: const Icon(Icons.graphic_eq, color: AppColors.accent, size: 22),
                   )
-                : AlbumArt(url: api.artUrl(track.path)),
+                : AlbumArt(url: api?.artUrl(track.path), file: artFile),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -196,7 +217,13 @@ class TrackRow extends StatelessWidget {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(fmtTime(track.durationSec), style: AppText.mono),
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (downloaded) ...[
+                    const Icon(Icons.download_done_rounded, size: 14, color: AppColors.accent),
+                    const SizedBox(width: 4),
+                  ],
+                  Text(fmtTime(track.durationSec), style: AppText.mono),
+                ]),
                 const SizedBox(height: 4),
                 InkResponse(
                   onTap: onMenu,

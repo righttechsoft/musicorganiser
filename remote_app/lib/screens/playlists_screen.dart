@@ -68,6 +68,25 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
               onTap: () { Navigator.pop(ctx); app.goNow(); app.api!.playPlaylist(p.id); },
             ),
             ListTile(
+              leading: const Icon(Icons.download_for_offline_outlined, color: AppColors.text),
+              title: Text('Download playlist', style: AppText.trackTitle.copyWith(fontWeight: FontWeight.w500)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                try {
+                  final ts = await app.api!.playlistFiles(p.id);
+                  final n = app.downloads.enqueueAll(ts);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(n > 0 ? '$n track${n == 1 ? '' : 's'} queued' : 'Already downloaded')));
+                  }
+                } catch (_) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not load playlist')));
+                  }
+                }
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.drive_file_rename_outline, color: AppColors.text),
               title: Text('Rename', style: AppText.trackTitle.copyWith(fontWeight: FontWeight.w500)),
               onTap: () async {
@@ -291,11 +310,13 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                                   track: t,
                                   api: app.api!,
                                   playing: _same(playingPath, t.path),
+                                  downloaded: app.offline.has(t.path),
                                   onTap: () => _play(t),
                                   onMenu: () => showTrackActions(
                                     context,
                                     track: t,
                                     api: app.api!,
+                                    app: app,
                                     onChanged: () async {
                                       await app.loadFiles();
                                       await _load();

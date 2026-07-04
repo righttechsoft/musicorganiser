@@ -20,12 +20,70 @@
         <converters:TitleConverter x:Key="TitleConverter"/>
         <converters:PlayingFolderFontWeightConverter x:Key="PlayingFolderFontWeightConverter"/>
 
+        <!-- Flat, circular transport buttons. Background is TemplateBound so the active-state
+             DataTriggers (shuffle/repeat) still colour the button. -->
         <Style x:Key="PlayerButtonStyle" TargetType="Button">
-            <Setter Property="Width" Value="40"/>
-            <Setter Property="Height" Value="40"/>
-            <Setter Property="Margin" Value="5,0"/>
-            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Width" Value="42"/>
+            <Setter Property="Height" Value="42"/>
+            <Setter Property="Margin" Value="3,0"/>
+            <Setter Property="FontSize" Value="15"/>
             <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="#33373E"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="21"
+                                Background="{TemplateBinding Background}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#E9EEF4"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#DCE6F1"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Primary play/pause button: larger accent-filled circle (matches the mobile app). -->
+        <Style x:Key="PlayerPlayButtonStyle" TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+            <Setter Property="Width" Value="52"/>
+            <Setter Property="Height" Value="52"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#2F8FE0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="26"
+                                Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#2B82CC"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#256FB0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
@@ -468,9 +526,11 @@
                                 <Button Command="{Binding ToggleShuffleCommand}" ToolTip="Shuffle" Content="&#x1F500;">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Setter Property="Foreground" Value="#BBBBBB"/>
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding ShuffleEnabled}" Value="True">
                                                     <Setter Property="Background" Value="#90CAF9"/>
+                                                    <Setter Property="Foreground" Value="Black"/>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
@@ -478,7 +538,7 @@
                                 </Button>
                                 <Button Content="&#9664;&#9664;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding PreviousCommand}" ToolTip="Previous"/>
-                                <Button Style="{StaticResource PlayerButtonStyle}"
+                                <Button Style="{StaticResource PlayerPlayButtonStyle}"
                                         Command="{Binding PlayPauseCommand}" ToolTip="Play/Pause">
                                     <Button.Content>
                                         <TextBlock>

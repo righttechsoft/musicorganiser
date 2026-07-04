@@ -8,6 +8,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final app = AppState();
   await app.loadPrefs();
+  await app.initOffline();
   // Try to reconnect to the most recent desktop silently on launch.
   final r = app.mostRecent;
   if (r != null) {

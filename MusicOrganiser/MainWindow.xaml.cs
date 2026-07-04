@@ -164,9 +164,10 @@ public partial class MainWindow : Window
             }
             if (tvi == null)
             {
-                // Container not realized yet (virtualization). Ancestors expanded above
-                // are now closer to the target, so retry on a later layout pass.
-                if (attempt < 5)
+                // Container not realized yet. The folder tree loads async (cache + disk
+                // refresh), so keep retrying on later layout passes until the whole chain
+                // materializes. ~60 Background passes ≈ a few seconds — enough for a slow load.
+                if (attempt < 60)
                     Dispatcher.BeginInvoke(new Action(() => ScrollTreeToFolder(path, attempt + 1)),
                         System.Windows.Threading.DispatcherPriority.Background);
                 return;

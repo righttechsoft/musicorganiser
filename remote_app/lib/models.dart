@@ -79,6 +79,7 @@ class TrackFile {
   final int? rating;
   final bool isPlaying;
   final int? playlistEntryId; // set only for tracks fetched from a playlist
+  final int? createdSec, modifiedSec; // filesystem times (browse only); null elsewhere
   TrackFile({
     required this.path,
     required this.title,
@@ -89,6 +90,8 @@ class TrackFile {
     required this.rating,
     required this.isPlaying,
     this.playlistEntryId,
+    this.createdSec,
+    this.modifiedSec,
   });
   factory TrackFile.fromJson(Map<String, dynamic> j) => TrackFile(
         path: _str(j['path']),
@@ -100,6 +103,8 @@ class TrackFile {
         rating: j['rating'] == null ? null : _int(j['rating']),
         isPlaying: _bool(j['isPlaying']),
         playlistEntryId: j['playlistEntryId'] == null ? null : _int(j['playlistEntryId']),
+        createdSec: j['createdSec'] == null ? null : _int(j['createdSec']),
+        modifiedSec: j['modifiedSec'] == null ? null : _int(j['modifiedSec']),
       );
   String get name => title.isNotEmpty ? title : path.split(RegExp(r'[\\/]')).last;
   String get subtitle => [artist, album].where((s) => s.isNotEmpty).join(' — ');
@@ -109,9 +114,14 @@ class TrackFile {
 
 class FolderEntry {
   final String name, path;
-  FolderEntry({required this.name, required this.path});
-  factory FolderEntry.fromJson(Map<String, dynamic> j) =>
-      FolderEntry(name: _str(j['name']), path: _str(j['path']));
+  final int? createdSec, modifiedSec; // filesystem times; null for drives
+  FolderEntry({required this.name, required this.path, this.createdSec, this.modifiedSec});
+  factory FolderEntry.fromJson(Map<String, dynamic> j) => FolderEntry(
+        name: _str(j['name']),
+        path: _str(j['path']),
+        createdSec: j['createdSec'] == null ? null : _int(j['createdSec']),
+        modifiedSec: j['modifiedSec'] == null ? null : _int(j['modifiedSec']),
+      );
 }
 
 class BrowseResult {

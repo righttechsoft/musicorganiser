@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../app_state.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'downloads_screen.dart';
 import 'history_screen.dart';
 import 'library_screen.dart';
 import 'now_playing_view.dart';
@@ -43,6 +44,7 @@ class _HomeShellState extends State<HomeShell> {
   Widget _library() => LibraryScreen(app: app);
   Widget _playlists() => PlaylistsScreen(app: app);
   Widget _history() => HistoryScreen(app: app, onGoLibrary: () => _go(1));
+  Widget _downloads() => DownloadsScreen(app: app);
 
   Widget _listPane() {
     switch (_tab) {
@@ -50,6 +52,8 @@ class _HomeShellState extends State<HomeShell> {
         return _playlists();
       case 3:
         return _history();
+      case 4:
+        return _downloads();
       default:
         return _library();
     }
@@ -92,6 +96,7 @@ class _HomeShellState extends State<HomeShell> {
               _library(),
               _playlists(),
               _history(),
+              _downloads(),
             ],
           ),
         ),
@@ -124,6 +129,7 @@ class _HomeShellState extends State<HomeShell> {
           NavigationDestination(icon: Icon(Icons.folder_outlined), label: 'Library'),
           NavigationDestination(icon: Icon(Icons.queue_music), label: 'Playlists'),
           NavigationDestination(icon: Icon(Icons.history), label: 'History'),
+          NavigationDestination(icon: Icon(Icons.download_for_offline_outlined), label: 'Offline'),
         ],
       ),
     );
@@ -181,6 +187,7 @@ class _HomeShellState extends State<HomeShell> {
         NavigationRailDestination(icon: Icon(Icons.folder_outlined), label: Text('Library')),
         NavigationRailDestination(icon: Icon(Icons.queue_music), label: Text('Playlists')),
         NavigationRailDestination(icon: Icon(Icons.history), label: Text('History')),
+        NavigationRailDestination(icon: Icon(Icons.download_for_offline_outlined), label: Text('Offline')),
       ],
     );
   }
