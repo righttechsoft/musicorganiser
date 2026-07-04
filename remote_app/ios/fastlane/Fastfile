@@ -63,11 +63,24 @@ platform :ios do
       targets: ["Watch App"]
     )
 
-    sh("cd '#{project_dir}' && flutter build ipa --release " \
-       "--build-number=#{build_number} " \
-       "--export-options-plist='#{export_opts}'")
+    # Do NOT use `flutter build ipa` — its xcodebuild wrapper compiles the embedded watch
+    # target's asset catalog under the wrong SDK (actool "AppIcon did not have any applicable
+    # content"). Instead let Flutter only write the build number into Generated.xcconfig
+    # (--config-only, no xcodebuild), then archive the Runner scheme with gym/xcodebuild
+    # directly — that builds the Watch App dependency under the watchOS SDK correctly.
+    sh("cd '#{project_dir}' && flutter build ios --config-only --release " \
+       "--build-number=#{build_number}")
 
-    ipa = Dir[File.join(project_dir, "build/ios/ipa/*.ipa")].first
+    ipa = build_app(
+      workspace: File.expand_path("../Runner.xcworkspace", fastlane_dir),
+      scheme: "Runner",
+      configuration: "Release",
+      export_method: "app-store",
+      export_options: export_opts,
+      output_directory: File.join(project_dir, "build/ios/ipa"),
+      output_name: "Runner.ipa",
+      clean: true
+    )
     UI.user_error!("No IPA produced") if ipa.nil?
 
     upload_to_testflight(
