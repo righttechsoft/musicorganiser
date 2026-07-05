@@ -274,6 +274,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand ToggleShuffleCommand { get; }
     public ICommand CycleRepeatCommand { get; }
     public ICommand PlayFolderCommand { get; }
+    public ICommand ExitRemoteSinkCommand { get; }
 
     public AudioPlayerService AudioPlayer => _audioPlayer;
     public FileOperationsService FileOperations => _fileOperations;
@@ -324,6 +325,8 @@ public class MainViewModel : ViewModelBase, IDisposable
         ToggleShuffleCommand = new RelayCommand(() => ShuffleEnabled = !ShuffleEnabled);
         CycleRepeatCommand = new RelayCommand(CycleRepeat);
         PlayFolderCommand = new RelayCommand(p => _ = PlayFolderTreeAsync((p as FolderNode)?.FullPath));
+        // Desktop-side kill switch for remote-sink mode (phone is the audio sink).
+        ExitRemoteSinkCommand = new RelayCommand(() => RemoteSink = false);
 
         RefreshPlaylists();
 
@@ -396,6 +399,15 @@ public class MainViewModel : ViewModelBase, IDisposable
         SelectedPlaylist = null;
 
         CurrentFolderPath = path;
+
+        // Remember the last real folder so it can be restored on next launch.
+        // ponytail: writes settings.json per folder click (same as the Volume setter); fine at this rate.
+        if (Directory.Exists(path))
+        {
+            _appSettings.LastFolderPath = path;
+            _appSettings.Save();
+        }
+
         MusicFiles.Clear();
         AlbumCover = null;
 
@@ -807,20 +819,34 @@ public class MainViewModel : ViewModelBase, IDisposable
     // Render devices added/removed (e.g. Bluetooth) — rebuild the picker list on the UI thread.
     private void OnDevicesChanged()
     {
-        System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
-        {
-            OutputDevices = _audioPlayer.GetOutputDevices()
-                .Select(d => new OutputDeviceItem(d.Id, d.Name)).ToList();
-            OnPropertyChanged(nameof(OutputDevices));
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(RefreshOutputDevices);
+    }
 
-            // Re-resolve the shown selection (record equality keeps it if still present; else
-            // the service already fell back to default). Set the field directly — no re-persist/switch.
-            var currentId = _audioPlayer.OutputDeviceId ?? _audioPlayer.GetDefaultDeviceId();
-            _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentId)
-                ?? OutputDevices.FirstOrDefault();
-            OnPropertyChanged(nameof(SelectedOutputDevice));
-            OnPropertyChanged(nameof(SystemVolume)); // active endpoint may have changed
-        });
+    // Re-enumerate active output devices and re-resolve the shown selection. Safe to call on the
+    // UI thread. Also invoked when the picker dropdown opens, because the CoreAudio device-change
+    // callback is unreliable for Bluetooth connects (device wouldn't appear until an app restart).
+    public void RefreshOutputDevices()
+    {
+        OutputDevices = _audioPlayer.GetOutputDevices()
+            .Select(d => new OutputDeviceItem(d.Id, d.Name)).ToList();
+        OnPropertyChanged(nameof(OutputDevices));
+
+        // Re-resolve the shown selection (record equality keeps it if still present; else
+        // the service already fell back to default). Set the field directly — no re-persist/switch.
+        var currentId = _audioPlayer.OutputDeviceId ?? _audioPlayer.GetDefaultDeviceId();
+        _selectedOutputDevice = OutputDevices.FirstOrDefault(d => d.Id == currentId)
+            ?? OutputDevices.FirstOrDefault();
+        OnPropertyChanged(nameof(SelectedOutputDevice));
+        OnPropertyChanged(nameof(SystemVolume)); // active endpoint may have changed
+    }
+
+    // Restore the folder open when the app last closed. Called once after the window loads.
+    public async Task RestoreLastFolderAsync()
+    {
+        var path = _appSettings.LastFolderPath;
+        if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+        LoadFolder(path);
+        await FolderTree.NavigateToPathAsync(path);
     }
 
     private void OnPositionChanged(object? sender, TimeSpan position)

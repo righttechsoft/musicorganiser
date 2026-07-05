@@ -14,6 +14,13 @@ final class WatchClient: ObservableObject {
     @Published var reachable = false
     @Published var connecting = false
 
+    // Volume shown/driven by the crown. Kept separate from status.volume so a rapid crown
+    // turn isn't clobbered by the 1.5s status poll mid-adjust. The poll re-syncs it once the
+    // user stops turning and the debounced send lands.
+    @Published var volume: Int = 50
+    private var volSendTask: Task<Void, Never>?
+    private var adjustingVolume = false
+
     private var pollTask: Task<Void, Never>?
     private var base: URL? { ip.isEmpty ? nil : URL(string: "http://\(ip):8787") }
 
@@ -57,6 +64,7 @@ final class WatchClient: ObservableObject {
             let s = try JSONDecoder().decode(PlayerStatus.self, from: data)
             status = s
             reachable = true
+            if !adjustingVolume { volume = s.volume }  // don't fight an in-progress crown turn
         } catch {
             reachable = false
         }
@@ -65,8 +73,29 @@ final class WatchClient: ObservableObject {
     // ---- commands ----
     func playback(_ action: String) { post("playback/\(action)") }
 
+    // Debounced: crown fires many times per turn. Update the shown value immediately, but only
+    // POST the final level after the user pauses ~300ms, so the desktop isn't flooded.
     func setVolume(_ level: Int) {
-        post("volume", body: ["level": max(0, min(100, level))])
+        let v = max(0, min(100, level))
+        volume = v
+        adjustingVolume = true
+        volSendTask?.cancel()
+        volSendTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            await self?.sendVolume(v)
+        }
+    }
+
+    private func sendVolume(_ v: Int) async {
+        guard let base else { return }
+        var req = URLRequest(url: base.appendingPathComponent("volume"))
+        req.httpMethod = "POST"
+        req.timeoutInterval = 4
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["level": v])
+        _ = try? await URLSession.shared.data(for: req)
+        adjustingVolume = false  // next poll may re-sync the shown value from the server
     }
 
     private func post(_ path: String, body: [String: Any]? = nil) {

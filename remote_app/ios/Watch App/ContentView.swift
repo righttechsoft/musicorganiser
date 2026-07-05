@@ -76,7 +76,7 @@ struct PlayerView: View {
 
             HStack {
                 Image(systemName: "speaker.fill").font(.caption2)
-                ProgressView(value: Double(client.status.volume), total: 100)
+                ProgressView(value: Double(client.volume), total: 100)
                 Image(systemName: "speaker.wave.3.fill").font(.caption2)
             }
         }
@@ -85,10 +85,12 @@ struct PlayerView: View {
                               sensitivity: .medium, isContinuous: false)
         .onChange(of: crown) { _, v in
             let level = Int(v.rounded())
-            if level != client.status.volume { client.setVolume(level) }
+            if level != client.volume { client.setVolume(level) }
         }
-        .onChange(of: client.status.volume) { _, v in crown = Double(v) }
-        .onAppear { crown = Double(client.status.volume) }
+        .onChange(of: client.volume) { _, v in
+            if Int(crown.rounded()) != v { crown = Double(v) }
+        }
+        .onAppear { crown = Double(client.volume) }
     }
 
     private var repeatIcon: String {

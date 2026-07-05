@@ -17,6 +17,9 @@ public class AppSettings
     // Master (system) volume is intentionally not persisted — it is a live OS value.
     public string? OutputDeviceId { get; set; }
 
+    // Last folder browsed; restored on next launch. null = nothing to restore.
+    public string? LastFolderPath { get; set; }
+
     public void Save()
     {
         try

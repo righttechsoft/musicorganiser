@@ -575,23 +575,35 @@
                                 </Button>
                             </StackPanel>
 
-                            <!-- Remote playback indicator (audio streaming to the phone) -->
-                            <Border Grid.Column="1" Background="#1E88E5" CornerRadius="4"
-                                    Padding="8,3" Margin="10,0" VerticalAlignment="Center"
+                            <!-- Remote playback indicator + kill switch (click to take audio back to this PC) -->
+                            <Button Grid.Column="1" Command="{Binding ExitRemoteSinkCommand}"
+                                    Margin="10,0" VerticalAlignment="Center" Cursor="Hand"
+                                    ToolTip="Playing on phone — click to bring audio back to this PC"
                                     Visibility="{Binding RemoteSink, Converter={StaticResource BoolToVis}}">
-                                <TextBlock Text="&#x1F4F1; Remote playback" Foreground="White"
-                                           FontWeight="SemiBold" FontSize="12"/>
-                            </Border>
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border Background="#1E88E5" CornerRadius="4" Padding="8,3">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#x1F4F1; Remote playback" Foreground="White"
+                                                           FontWeight="SemiBold" FontSize="12"/>
+                                                <TextBlock Text="&#x2715;" Foreground="White" FontWeight="Bold"
+                                                           FontSize="12" Margin="8,0,0,0"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
 
                             <!-- Output Device + Volume Controls -->
                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                                 <!-- Output device selector -->
                                 <ComboBox x:Name="OutputDeviceBox"
-                                          Width="150" Height="22"
+                                          Width="250" Height="22"
                                           VerticalAlignment="Center" Margin="0,0,10,0"
                                           ItemsSource="{Binding OutputDevices}"
                                           SelectedItem="{Binding SelectedOutputDevice, Mode=TwoWay}"
                                           DisplayMemberPath="Name"
+                                          DropDownOpened="OutputDeviceBox_DropDownOpened"
                                           ToolTip="Output device"/>
                                 <!-- System (Windows master) volume -->
                                 <TextBlock Text="&#x1F310;" FontSize="16" VerticalAlignment="Center" Margin="0,0,5,0"/>

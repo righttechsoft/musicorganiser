@@ -30,6 +30,20 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(new Action(UpdateAlbumCoverPosition),
                 System.Windows.Threading.DispatcherPriority.Background);
         Closed += (s, e) => ViewModel.Dispose();
+        Loaded += MainWindow_Loaded;
+    }
+
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        // Restore the folder that was open when the app last closed.
+        await ViewModel.RestoreLastFolderAsync();
+    }
+
+    // The CoreAudio device-change callback misses some Bluetooth connects, so re-enumerate
+    // whenever the user actually opens the picker — the list is then always current.
+    private void OutputDeviceBox_DropDownOpened(object sender, EventArgs e)
+    {
+        ViewModel.RefreshOutputDevices();
     }
 
     private void CoverHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
