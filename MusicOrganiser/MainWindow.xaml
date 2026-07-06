@@ -217,10 +217,30 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBox Grid.Row="0"
-                             Text="{Binding FolderTree.FilterText, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="Filter folders"
-                             Margin="0,0,0,5"/>
+                    <Grid Grid.Row="0" Margin="0,0,0,5">
+                        <TextBox x:Name="FilterBox"
+                                 Text="{Binding FolderTree.FilterText, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Filter folders"
+                                 Padding="0,0,20,0"/>
+                        <!-- One-click clear; hidden while the filter is empty -->
+                        <Button Content="&#x2715;" Click="ClearFilter_Click"
+                                HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Width="18" Height="18" Margin="0,0,3,0" Padding="0"
+                                Background="Transparent" BorderThickness="0"
+                                Foreground="#888888" FontSize="11" Cursor="Hand"
+                                ToolTip="Clear filter">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding FolderTree.FilterText}" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
                     <ComboBox Grid.Row="1"
                               ItemsSource="{Binding FolderTree.SortOptions}"
                               SelectedItem="{Binding FolderTree.SelectedSortOption}"

@@ -46,6 +46,12 @@ public partial class MainWindow : Window
         ViewModel.RefreshOutputDevices();
     }
 
+    private void ClearFilter_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.FolderTree.FilterText = string.Empty;
+        FilterBox.Focus();
+    }
+
     private void CoverHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
 
     private void AlbumCoverImage_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
