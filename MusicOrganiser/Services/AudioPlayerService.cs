@@ -25,6 +25,8 @@ public class AudioPlayerService : IDisposable
     // Held handle for the endpoint whose master volume we watch for external changes.
     private MMDevice? _monitoredDevice;
     private AudioEndpointVolume? _monitoredEndpointVolume;
+    // Serializes device-change handling — a single Bluetooth connect fires several callbacks.
+    private readonly object _deviceChangeLock = new();
 
     public event EventHandler<TimeSpan>? PositionChanged;
     public event EventHandler? PlaybackStopped;
@@ -177,35 +179,49 @@ public class AudioPlayerService : IDisposable
         catch { _notificationClient = null; }
     }
 
-    // Fired (on a COM thread) when the set of render devices changes.
+    // Entry point for the CoreAudio notification callbacks. CRITICAL: the callback runs on an
+    // MMDevice-internal thread that holds an audio-engine lock, and MSDN forbids calling any
+    // enumerator/device/endpoint-volume method from inside it — doing so deadlocks, and a
+    // concurrent Play() (WasapiOut/AudioClient) then hangs. So return immediately and do the
+    // real work (which touches CoreAudio) on the thread pool, off the callback thread.
+    private void OnDevicesChangedExternal()
+    {
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => OnDevicesChangedInternal());
+    }
+
+    // Fired off the COM callback thread when the set of render devices changes.
     private void OnDevicesChangedInternal()
     {
-        try
+        lock (_deviceChangeLock)
         {
-            // If the selected device vanished (e.g. BT disconnected), fall back to default.
-            if (_selectedDevice != null)
+            try
             {
-                var active = false;
-                try { using var d = _enum.GetDevice(_selectedDevice.ID); active = d.State == DeviceState.Active; }
-                catch { active = false; }
-                if (!active) { _selectedDevice.Dispose(); _selectedDevice = null; }
+                // If the selected device vanished (e.g. BT disconnected), fall back to default.
+                if (_selectedDevice != null)
+                {
+                    var active = false;
+                    try { using var d = _enum.GetDevice(_selectedDevice.ID); active = d.State == DeviceState.Active; }
+                    catch { active = false; }
+                    if (!active) { _selectedDevice.Dispose(); _selectedDevice = null; }
+                }
             }
-        }
-        catch { }
+            catch { }
 
-        UpdateVolumeMonitor();   // re-point the volume listener at the current active/default endpoint
+            UpdateVolumeMonitor();   // re-point the volume listener at the current active/default endpoint
+        }
         DevicesChanged?.Invoke();
     }
 
-    // CoreAudio device-change callbacks. All just funnel to OnDevicesChangedInternal.
+    // CoreAudio device-change callbacks. Must return fast without re-entering CoreAudio, so they
+    // only hand off to OnDevicesChangedExternal (which defers the work to the thread pool).
     private sealed class NotificationClient : IMMNotificationClient
     {
         private readonly AudioPlayerService _svc;
         public NotificationClient(AudioPlayerService svc) => _svc = svc;
-        public void OnDeviceStateChanged(string deviceId, DeviceState newState) => _svc.OnDevicesChangedInternal();
-        public void OnDeviceAdded(string pwstrDeviceId) => _svc.OnDevicesChangedInternal();
-        public void OnDeviceRemoved(string deviceId) => _svc.OnDevicesChangedInternal();
-        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) => _svc.OnDevicesChangedInternal();
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) => _svc.OnDevicesChangedExternal();
+        public void OnDeviceAdded(string pwstrDeviceId) => _svc.OnDevicesChangedExternal();
+        public void OnDeviceRemoved(string deviceId) => _svc.OnDevicesChangedExternal();
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) => _svc.OnDevicesChangedExternal();
         public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
     }
 
