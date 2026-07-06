@@ -218,20 +218,42 @@ public class FolderNode : ViewModelBase
         }
     }
 
+    // Sets the sort field on this node and every loaded descendant (cheap), collecting the nodes
+    // whose child collection needs re-ordering. Split out from a resort so ApplySortAsync can
+    // yield between the (expensive) collection moves.
+    public void PrepareSort(FolderSortOption opt, List<FolderNode> toResort)
+    {
+        _sortOption = opt;
+        OnPropertyChanged(nameof(SortOption));
+        if (_isLoaded && Children.Count > 1 && !Children[0]._isDummy)
+            toResort.Add(this);
+        foreach (var child in Children)
+            if (!child._isDummy) child.PrepareSort(opt, toResort);
+    }
+
+    public void ResortLoadedChildren()
+    {
+        if (_isLoaded && Children.Count > 1 && !Children[0]._isDummy)
+            ResortChildren();
+    }
+
     private void ResortChildren()
     {
-        var sorted = SortDirectories(Children.Where(c => !c._isDummy).Select(c => c.FullPath)).ToList();
+        var nonDummy = Children.Where(c => !c._isDummy).ToList();
+        if (nonDummy.Count < 2) return;
 
-        // Reorder children based on sorted list
+        var sorted = SortDirectories(nonDummy.Select(c => c.FullPath)).ToList();
+        var byPath = new Dictionary<string, FolderNode>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in nonDummy) byPath[c.FullPath] = c;
+
+        // Move each node into its sorted slot. O(n) dictionary lookups instead of an O(n^2)
+        // LINQ scan per element (the old version froze on large folders).
         for (int i = 0; i < sorted.Count; i++)
         {
-            var currentIndex = Children.Select((c, idx) => new { c, idx })
-                .FirstOrDefault(x => x.c.FullPath == sorted[i])?.idx ?? -1;
-
+            if (!byPath.TryGetValue(sorted[i], out var node)) continue;
+            var currentIndex = Children.IndexOf(node);
             if (currentIndex != -1 && currentIndex != i)
-            {
                 Children.Move(currentIndex, i);
-            }
         }
     }
 
@@ -444,6 +466,14 @@ public class FolderTreeViewModel : ViewModelBase
         new FolderSortOptionItem(FolderSortOption.ModifiedDateDesc, "Modified (Newest)")
     };
 
+    private bool _isBusy;
+    // Drives the window's busy overlay during long tree operations (sort change, folder restore).
+    public bool IsBusy
+    {
+        get => _isBusy;
+        set => SetProperty(ref _isBusy, value);
+    }
+
     public FolderSortOptionItem SelectedSortOption
     {
         get => _selectedSortOption;
@@ -451,12 +481,34 @@ public class FolderTreeViewModel : ViewModelBase
         {
             if (SetProperty(ref _selectedSortOption, value) && value != null)
             {
-                foreach (var node in RootNodes)
-                {
-                    node.SortOption = value.Value;
-                }
+                _ = ApplySortAsync(value.Value);
             }
         }
+    }
+
+    // Re-sorting the whole loaded tree on the UI thread froze the app. Do it in yielding chunks
+    // so the busy overlay paints and animates instead of locking up.
+    private async Task ApplySortAsync(FolderSortOption opt)
+    {
+        IsBusy = true;
+        try
+        {
+            await Task.Yield(); // let the overlay render before the heavy work starts
+
+            // Set the sort field on every loaded node (cheap) and collect the ones whose child
+            // collection actually needs re-ordering.
+            var toResort = new List<FolderNode>();
+            foreach (var node in RootNodes)
+                node.PrepareSort(opt, toResort);
+
+            var n = 0;
+            foreach (var node in toResort)
+            {
+                node.ResortLoadedChildren();
+                if (++n % 20 == 0) await Task.Yield(); // keep the UI thread responsive
+            }
+        }
+        finally { IsBusy = false; }
     }
 
     public string FilterText
@@ -549,6 +601,13 @@ public class FolderTreeViewModel : ViewModelBase
     }
 
     public async Task<bool> NavigateToPathAsync(string path)
+    {
+        IsBusy = true;
+        try { return await NavigateToPathCoreAsync(path); }
+        finally { IsBusy = false; }
+    }
+
+    private async Task<bool> NavigateToPathCoreAsync(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
 
