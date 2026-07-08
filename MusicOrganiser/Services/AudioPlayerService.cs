@@ -22,6 +22,11 @@ public class AudioPlayerService : IDisposable
     private bool _disposed;
     private float _volume = 1.0f;
     private bool _localMuted;
+    // Bluetooth A2DP endpoints often fail (throw at Init, or error mid-stream via PlaybackStopped)
+    // in WASAPI shared *event-sync* mode; push mode is reliable. Sticky once tripped for the session.
+    // ponytail: session-global, not per-device — push mode is universally safe (marginally higher
+    // latency), so no per-device tracking. Add a device->mode map if that latency ever matters.
+    private bool _pushModeFallback;
     // Held handle for the endpoint whose master volume we watch for external changes.
     private MMDevice? _monitoredDevice;
     private AudioEndpointVolume? _monitoredEndpointVolume;
@@ -277,10 +282,21 @@ public class AudioPlayerService : IDisposable
             // devices alive until StopAndReleaseFile rather than disposing here.
             if (ownsDevice) _ownedPlaybackDevice = device;
 
-            // WasapiOut shared mode won't resample: convert to the device mix format first.
-            _resampler = new MediaFoundationResampler(_audioFile, device.AudioClient.MixFormat.AsStandardWaveFormat());
-            _output = new WasapiOut(device, AudioClientShareMode.Shared, true, 100);
-            _output.Init(_resampler);
+            // WasapiOut shared mode won't resample: match the device's mix format.
+            // Resample sample-rate only, staying stereo (float, device rate). For a multichannel
+            // endpoint (5.1/7.1 rear speakers) StereoToSurround then duplicates stereo across every
+            // speaker; its WaveFormat IS the device mix format (WAVE_FORMAT_EXTENSIBLE). Feeding
+            // that exact extensible format is what lets shared-mode AudioClient.Initialize accept
+            // >2 channels — the stripped AsStandardWaveFormat() form fails with E_INVALIDARG
+            // ("Value does not fall within the expected range").
+            var mixFormat = device.AudioClient.MixFormat;
+            _resampler = new MediaFoundationResampler(
+                _audioFile, WaveFormat.CreateIeeeFloatWaveFormat(mixFormat.SampleRate, 2));
+            IWaveProvider outProvider = mixFormat.Channels > 2
+                ? new StereoToSurround(_resampler.ToSampleProvider(), mixFormat)
+                : _resampler;
+            _output = new WasapiOut(device, AudioClientShareMode.Shared, !_pushModeFallback, 100);
+            _output.Init(outProvider);
             _output.PlaybackStopped += OnPlaybackStopped;
             _output.Play();
             CurrentFilePath = filePath;
@@ -289,6 +305,13 @@ public class AudioPlayerService : IDisposable
         catch (Exception ex)
         {
             StopAndReleaseFile();
+            // Event-sync init failed (typical on Bluetooth) -> retry once in push mode.
+            if (!_pushModeFallback)
+            {
+                _pushModeFallback = true;
+                Play(filePath);
+                return;
+            }
             throw new InvalidOperationException($"Failed to play file: {ex.Message}", ex);
         }
     }
@@ -373,6 +396,25 @@ public class AudioPlayerService : IDisposable
     private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
     {
         _positionTimer.Stop();
+
+        // Device errored mid-stream (common on Bluetooth event-sync) rather than the track
+        // ending cleanly. Retry the same track/position in push mode before giving up, so the
+        // ViewModel doesn't mistake it for end-of-track and skip through the whole queue.
+        // Deferred off this callback thread: re-initing WASAPI here would dispose _output from
+        // inside its own PlaybackStopped callback and deadlock (see device-change handling).
+        if (e.Exception != null && !_pushModeFallback && CurrentFilePath != null)
+        {
+            _pushModeFallback = true;
+            var path = CurrentFilePath;
+            var pos = CurrentPosition;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { Play(path); Seek(pos); }
+                catch { PlaybackStopped?.Invoke(this, EventArgs.Empty); }
+            });
+            return;
+        }
+
         PlaybackStopped?.Invoke(this, EventArgs.Empty);
     }
 
@@ -397,5 +439,71 @@ public class AudioPlayerService : IDisposable
         _monitoredDevice?.Dispose();
         _selectedDevice?.Dispose();
         _enum.Dispose();
+    }
+
+    // Duplicates a stereo source across all channels of a multichannel endpoint so stereo music
+    // is audible on every speaker (fronts + rears + sides). Front L/R feed the left/right side
+    // speakers, centre gets the (L+R) mix, LFE stays silent.
+    // ponytail: routing assumes the standard KSAUDIO channel order for 4/6/8ch; an endpoint with
+    // an exotic channel mask could map oddly — read WaveFormatExtensible.ChannelMask if that shows up.
+    // IWaveProvider (not ISampleProvider) so it can expose the device's WAVE_FORMAT_EXTENSIBLE
+    // float format directly to WasapiOut. Wrapping via SampleToWaveProvider fails here — it
+    // demands Encoding == IeeeFloat, but the extensible mix format reports Encoding == Extensible
+    // ("Must be already floating point").
+    private sealed class StereoToSurround : IWaveProvider
+    {
+        private readonly ISampleProvider _src;       // stereo, float, at WaveFormat.SampleRate
+        private readonly (float l, float r)[] _map;  // per-output-channel gains
+        private readonly int _outCh;
+        private float[] _in = Array.Empty<float>();
+
+        public StereoToSurround(ISampleProvider stereoSource, WaveFormat deviceMixFormat)
+        {
+            _src = stereoSource;
+            WaveFormat = deviceMixFormat;            // expose the exact mix format to WasapiOut
+            _outCh = deviceMixFormat.Channels;
+            _map = BuildMap(_outCh);
+            System.Diagnostics.Debug.Assert(_map.Length == _outCh);
+        }
+
+        public WaveFormat WaveFormat { get; }
+
+        public int Read(byte[] buffer, int offset, int count)
+        {
+            var outFrames = count / (_outCh * 4);    // 4 bytes per 32-bit float sample
+            var need = outFrames * 2;                 // stereo input samples
+            if (_in.Length < need) _in = new float[need];
+
+            var got = _src.Read(_in, 0, need);        // stereo float samples
+            var frames = got / 2;
+            for (var f = 0; f < frames; f++)
+            {
+                var l = _in[f * 2];
+                var r = _in[f * 2 + 1];
+                var frameBase = offset + f * _outCh * 4;
+                for (var c = 0; c < _outCh; c++)
+                {
+                    var s = l * _map[c].l + r * _map[c].r;
+                    BitConverter.TryWriteBytes(buffer.AsSpan(frameBase + c * 4, 4), s);
+                }
+            }
+            return frames * _outCh * 4;
+        }
+
+        // Per-output gains for the standard KSAUDIO speaker order; even/odd fallback for odd counts.
+        private static (float, float)[] BuildMap(int channels) => channels switch
+        {
+            4 => new (float, float)[] { (1, 0), (0, 1), (1, 0), (0, 1) },                                       // FL FR BL BR
+            6 => new (float, float)[] { (1, 0), (0, 1), (0.5f, 0.5f), (0, 0), (1, 0), (0, 1) },                 // FL FR FC LFE BL BR
+            8 => new (float, float)[] { (1, 0), (0, 1), (0.5f, 0.5f), (0, 0), (1, 0), (0, 1), (1, 0), (0, 1) }, // + SL SR
+            _ => BuildEvenOdd(channels),
+        };
+
+        private static (float, float)[] BuildEvenOdd(int channels)
+        {
+            var m = new (float, float)[channels];
+            for (var i = 0; i < channels; i++) m[i] = i % 2 == 0 ? (1f, 0f) : (0f, 1f);
+            return m;
+        }
     }
 }
