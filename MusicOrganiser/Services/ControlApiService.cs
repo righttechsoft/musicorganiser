@@ -404,6 +404,10 @@ public class ControlApiService : IDisposable
                     .Select(r => (object)new { path = r.FullPath, displayName = r.DisplayName })
                     .ToList()));
                 break;
+            case ("POST", "/history/clear"):
+                OnUi(() => _vm.ClearRecentPlayedFolders());
+                await WriteJson(ctx, new { ok = true });
+                break;
 
             // ---- Move / Delete (reuse FileOperationsService) ----
             case ("POST", "/file/move"):
@@ -416,7 +420,12 @@ public class ControlApiService : IDisposable
                 await FileOp(ctx, req, (src, dst) => _vm.FileOperations.MoveFolderAsync(src, dst), needsDest: true);
                 break;
             case ("POST", "/folder/delete"):
-                await FileOp(ctx, req, (src, _) => _vm.FileOperations.DeleteFolderAsync(src), needsDest: false);
+                await FileOp(ctx, req, async (src, _) =>
+                {
+                    var ok = await _vm.FileOperations.DeleteFolderAsync(src);
+                    if (ok) _vm.RemoveRecentPlayedFolderTree(src);
+                    return ok;
+                }, needsDest: false);
                 break;
 
             // ---- Static PWA web client (served from /) ----

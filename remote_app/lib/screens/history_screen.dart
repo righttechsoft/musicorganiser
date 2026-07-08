@@ -35,6 +35,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  Future<void> _clearAll() async {
+    try {
+      await app.api!.clearHistory();
+    } catch (_) {}
+    await _load();
+  }
+
   void _open(HistoryItem it) {
     // Navigate the Library screen into this folder (shows its tracks inline).
     app.openInLibrary(it.path);
@@ -60,6 +67,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 ),
               ),
               IconButton(onPressed: _load, icon: const Icon(Icons.refresh, color: AppColors.muted)),
+              IconButton(
+                onPressed: items.isEmpty ? null : _clearAll,
+                icon: const Icon(Icons.delete_sweep, color: AppColors.muted),
+                tooltip: 'Clear history',
+              ),
             ],
           ),
         ),

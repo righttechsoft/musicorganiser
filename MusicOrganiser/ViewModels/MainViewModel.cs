@@ -358,6 +358,18 @@ public class MainViewModel : ViewModelBase, IDisposable
         RefreshRecentPlayedFolders();
     }
 
+    public void RemoveRecentPlayedFolderTree(string folderPath)
+    {
+        RecentPlayedStore.RemoveTree(folderPath);
+        RefreshRecentPlayedFolders();
+    }
+
+    public void ClearRecentPlayedFolders()
+    {
+        RecentPlayedStore.Clear();
+        RefreshRecentPlayedFolders();
+    }
+
     private void RefreshRecentPlayedFolders()
     {
         RecentPlayedFolders.Clear();
@@ -414,6 +426,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         _ = LoadFolderAsync(path, token);
         _ = LoadAlbumCoverAsync(path, token);
     }
+
 
     /// <summary>Queues every supported track under <paramref name="folderPath"/> (recursively,
     /// including subfolders) and starts playback. Shuffle/repeat apply to the queue as usual.</summary>

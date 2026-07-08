@@ -51,6 +51,8 @@ class ApiClient {
         .toList();
   }
 
+  Future<void> clearHistory() => http.post(_u('/history/clear'));
+
   String artUrl(String path) => _u('/file/art', {'path': path}).toString();
 
   // Transcoded AAC stream for local phone playback ("This device").

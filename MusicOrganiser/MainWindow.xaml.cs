@@ -37,7 +37,19 @@ public partial class MainWindow : Window
     {
         // Restore the folder that was open when the app last closed.
         await ViewModel.RestoreLastFolderAsync();
+
+        // Scroll the tree to reveal the restored folder.
+        if (!string.IsNullOrEmpty(ViewModel.CurrentFolderPath))
+        {
+            var path = ViewModel.CurrentFolderPath;
+            await Dispatcher.BeginInvoke(new Action(() => ScrollTreeToFolder(path)),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
     }
+
+    // One expander column (~8px) of horizontal indent per tree level; used to align the parent
+    // of the selected node to the viewport's left edge.
+    private const double TreeIndentPerLevel = 8;
 
     // The CoreAudio device-change callback misses some Bluetooth connects, so re-enumerate
     // whenever the user actually opens the picker — the list is then always current.
@@ -123,7 +135,36 @@ public partial class MainWindow : Window
         if (e.NewValue is FolderNode folder)
         {
             ViewModel.LoadFolder(folder.FullPath);
+            // Reclaim horizontal space: scroll so the selected node's parent sits at the left edge.
+            Dispatcher.BeginInvoke(new Action(AlignSelectedHorizontally),
+                System.Windows.Threading.DispatcherPriority.Background);
         }
+    }
+
+    // Scrolls the tree horizontally so the selected node's parent (one level up) aligns to the
+    // left edge — the deep indent otherwise pushes the current folder off to the right.
+    private void AlignSelectedHorizontally()
+    {
+        var sv = FindScrollViewer(FolderTreeView);
+        if (sv == null) return;
+        var tvi = FindSelectedContainer(FolderTreeView);
+        if (tvi == null) return;
+        var x = tvi.TransformToAncestor(sv).Transform(new Point(0, 0)).X;
+        sv.ScrollToHorizontalOffset(Math.Max(0, sv.HorizontalOffset + x - TreeIndentPerLevel));
+    }
+
+    // Finds the realized, currently-selected TreeViewItem (only realized containers exist under
+    // virtualization; the selected one is on-screen).
+    private static TreeViewItem? FindSelectedContainer(DependencyObject root)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is TreeViewItem { IsSelected: true } sel) return sel;
+            var found = FindSelectedContainer(child);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     private void TreeViewItem_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -184,6 +225,18 @@ public partial class MainWindow : Window
             }
             if (tvi == null)
             {
+                // Virtualized panel: containers for off-screen items are never created by
+                // layout passes alone — force-realize the target by index.
+                var index = parent.Items.IndexOf(n);
+                if (index >= 0 && FindVisualChild<VirtualizingPanel>(parent) is { } itemsHost)
+                {
+                    itemsHost.BringIndexIntoViewPublic(index);
+                    parent.UpdateLayout();
+                    tvi = parent.ItemContainerGenerator.ContainerFromItem(n) as TreeViewItem;
+                }
+            }
+            if (tvi == null)
+            {
                 // Container not realized yet. The folder tree loads async (cache + disk
                 // refresh), so keep retrying on later layout passes until the whole chain
                 // materializes. ~60 Background passes ≈ a few seconds — enough for a slow load.
@@ -217,6 +270,10 @@ public partial class MainWindow : Window
         var rowHeight = tvi.ActualHeight;
         var target = sv.VerticalOffset + offset - (sv.ViewportHeight - rowHeight) / 2;
         sv.ScrollToVerticalOffset(Math.Max(0, target));
+
+        // Align the target's parent to the left edge so the deep indent doesn't hide it off-right.
+        var x = tvi.TransformToAncestor(sv).Transform(new Point(0, 0)).X;
+        sv.ScrollToHorizontalOffset(Math.Max(0, sv.HorizontalOffset + x - TreeIndentPerLevel));
     }
 
     private static ScrollViewer? FindScrollViewer(DependencyObject root)
@@ -230,12 +287,30 @@ public partial class MainWindow : Window
         return null;
     }
 
+    // Depth-first, so for an ItemsControl this finds its own items host before any
+    // panel belonging to a nested (expanded) child item.
+    private static T? FindVisualChild<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T t) return t;
+            if (FindVisualChild<T>(child) is { } found) return found;
+        }
+        return null;
+    }
+
     private void RemoveRecentFolder_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button btn && btn.Tag is string path)
         {
             ViewModel.RemoveRecentPlayedFolder(path);
         }
+    }
+
+    private void ClearRecentFolders_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearRecentPlayedFolders();
     }
 
     private void MusicFilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -311,6 +386,14 @@ public partial class MainWindow : Window
         }
     }
 
+    // Wheel anywhere over the player panel adjusts the in-app volume (nothing in the
+    // panel scrolls, so the wheel is free for this).
+    private void PlayerPanel_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        ViewModel.Volume = Math.Max(0, Math.Min(100, ViewModel.Volume + (e.Delta > 0 ? 5 : -5)));
+        e.Handled = true;
+    }
+
     // ponytail: Volume setter writes settings.json each call, so a drag saves per move.
     // Tiny file; debounce only if it ever shows up as lag.
     private void SetVolumeFromMouse(System.Windows.Controls.ProgressBar bar, Point pos)
@@ -366,6 +449,12 @@ public partial class MainWindow : Window
             if (_rightClickedFolder != null)
                 _ = ViewModel.AddFolderToPlaylistAsync(playlist.Id, _rightClickedFolder.FullPath);
         });
+    }
+
+    private void FolderPlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder != null)
+            ViewModel.PlayFolderCommand.Execute(_rightClickedFolder);
     }
 
     private void FolderRefresh_Click(object sender, RoutedEventArgs e)
@@ -462,6 +551,7 @@ public partial class MainWindow : Window
             if (success)
             {
                 _rightClickedFolder.MarkAsDeleted();
+                ViewModel.RemoveRecentPlayedFolderTree(folderPath);
                 // Clear music files if the deleted folder was selected
                 if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
                 {

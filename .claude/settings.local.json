@@ -9,7 +9,8 @@
       "Bash(dotnet run:*)",
       "Bash(dotnet list:*)",
       "WebSearch",
-      "WebFetch(domain:docs.anthropic.com)"
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(findstr:*)"
     ]
   }
 }

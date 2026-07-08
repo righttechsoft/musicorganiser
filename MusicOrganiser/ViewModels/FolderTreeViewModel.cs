@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -41,6 +42,8 @@ public class FolderNode : ViewModelBase
     private bool _isLoaded;
     private bool _isLoading;
     private TaskCompletionSource<bool>? _loadTcs;
+    // The background filesystem-refresh pass kicked off by LoadChildrenAsync (see step 2).
+    private Task? _refreshTask;
     private readonly bool _isDummy;
     private string _filterText = string.Empty;
     private FolderSortOption _sortOption = FolderSortOption.NameAsc;
@@ -312,6 +315,14 @@ public class FolderNode : ViewModelBase
         await LoadChildrenAsync();
     }
 
+    // Awaits the background filesystem-refresh pass started by LoadChildrenAsync (if any).
+    // Navigation uses this to pick up folders not yet present in the SQLite cache.
+    public async Task EnsureRefreshedAsync()
+    {
+        var t = _refreshTask;
+        if (t != null) await t;
+    }
+
     private async Task LoadChildrenAsync()
     {
         if (_isLoaded || _isLoading) return;
@@ -342,8 +353,13 @@ public class FolderNode : ViewModelBase
             });
 
             // 2. Filesystem refresh: enumerate + diff off-thread, then apply adds/removes in
-            // ONE UI-thread batch.
-            await Task.Run(() =>
+            // ONE UI-thread batch. Runs in the BACKGROUND — NOT awaited here — so callers
+            // (folder restore / navigation / expansion) return as soon as the cache pass has
+            // populated the tree, instead of blocking on slow network enumeration + a
+            // File.GetAttributes per subfolder. Cache-first pattern (CLAUDE.md #8).
+            // ponytail: navigating to a folder created since the last scan (not yet in cache)
+            // relies on EnsureRefreshedAsync() to await this pass — see NavigateToPathCoreAsync.
+            _refreshTask = Task.Run(() =>
             {
                 try
                 {
@@ -639,7 +655,15 @@ public class FolderTreeViewModel : ViewModelBase
             // Normalize: Path.Combine("F:", "Music") returns "F:Music" — workaround above ensures "F:\Music"
             var child = current.Children.FirstOrDefault(c =>
                 string.Equals(c.FullPath.TrimEnd('\\', '/'), accumPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
-            if (child == null) return false;
+            if (child == null)
+            {
+                // Not in the cache-built children — wait for the background disk refresh
+                // (covers a folder created since the last scan) and retry once.
+                await current.EnsureRefreshedAsync();
+                child = current.Children.FirstOrDefault(c =>
+                    string.Equals(c.FullPath.TrimEnd('\\', '/'), accumPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                if (child == null) return false;
+            }
 
             current = child;
             if (i < parts.Length - 1)

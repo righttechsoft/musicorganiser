@@ -35,6 +35,26 @@ public class RecentPlayedFolders
         }
     }
 
+    /// Removes the folder and any of its descendants (used when a folder is deleted).
+    public void RemoveTree(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        var prefix = path.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+        if (Folders.RemoveAll(p =>
+                string.Equals(p, path, StringComparison.OrdinalIgnoreCase) ||
+                p.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) > 0)
+        {
+            Save();
+        }
+    }
+
+    public void Clear()
+    {
+        if (Folders.Count == 0) return;
+        Folders.Clear();
+        Save();
+    }
+
     public static string GetTwoLevelDisplay(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return string.Empty;
