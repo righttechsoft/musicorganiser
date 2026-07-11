@@ -7,8 +7,10 @@ A Windows desktop application for managing and playing music files, built with C
 ### File Browser
 - Tree view of all drives (local, network, USB, CD/DVD)
 - Async folder loading for responsive UI
-- Filter folders by name
+- Filter folders by name, with a one-click clear (×) button
 - Sort folders by Name, Creation Date, or Modified Date (ascending/descending)
+- Long sorts run off the UI thread with a busy overlay — the app never freezes on large trees
+- Reliable scroll-to-selection when navigating the tree
 
 ### Music Library
 - Grid view of music files in the selected folder
@@ -36,12 +38,15 @@ A Windows desktop application for managing and playing music files, built with C
 - **Output device selection** — pick any Windows audio device (WASAPI/CoreAudio); the list updates live as Bluetooth/USB devices connect or disconnect
 - **In-app volume** and a **Windows system-volume** control (the system bar reflects volume changes made outside the app)
 - Auto-play next track when current track ends
+- Robust Bluetooth playback: push-mode fallback for endpoints that stall in event mode, and no more hangs when pressing play right after a Bluetooth device connects
+- Stereo-to-surround upmix so 2-channel audio plays correctly on 5.1/7.1 devices
 
 ### Mobile Remote App
 A companion Flutter app (`remote_app/`) controls the desktop over your local network via a built-in HTTP API (port 8787):
 - Browse the library (search + sort), control playback, edit ratings/tags, manage playlists — all from your phone
 - **Stream to phone** — choose "This device" as the output to play the desktop's music on the phone (transcoded AAC, selectable quality) while the desktop stays silent
 - **Offline mode** — download tracks, folders or playlists to the phone (mirroring the desktop folder structure) and browse + play them with no connection to the desktop
+- **Apple Watch remote** — a control-only watchOS companion (play/pause, next/previous, volume) shipped alongside the iOS app
 - No account or cloud — the phone connects directly to the desktop on the LAN (or over VPN)
 
 ### AI Artist Info Panel
@@ -57,9 +62,17 @@ A companion Flutter app (`remote_app/`) controls the desktop over your local net
 - Confirmation dialog for delete operations
 - Automatically stops playback before moving/deleting playing files
 
+### Quality of Life
+- Single-instance app — launching a second copy activates the existing window instead of starting a duplicate
+- Recently-played history stays tidy: deleted folders (and their subfolders) are removed automatically, and a clear button (desktop and mobile) wipes the whole list
+
 ## Screenshots
 
 ![Main Window](docs/screenshot.png)
+
+Desktop with the mobile remote app (Now Playing) controlling playback:
+
+![Desktop with Mobile Remote](docs/screenshot-remote.png)
 
 ## Requirements
 
