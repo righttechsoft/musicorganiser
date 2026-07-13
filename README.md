@@ -17,7 +17,7 @@ A Windows desktop application for managing and playing music files, built with C
 - Displays metadata: file name, title, artist, album, duration, bitrate, genre, year
 - Highlights currently playing track
 - Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A
-- Album cover displayed behind the file grid
+- Album cover displayed behind the file grid; when a folder has several cover images, the display cycles through them (also on the mobile app's now-playing screen)
 
 ### Ratings & Tags
 - 1–5 star rating for both tracks and folders

@@ -7,18 +7,21 @@ bool _bool(dynamic v) => v == true;
 class NowPlaying {
   final String path, title, artist, album;
   final int durationSec;
+  final int artCount;
   NowPlaying(
       {required this.path,
       required this.title,
       required this.artist,
       required this.album,
-      required this.durationSec});
+      required this.durationSec,
+      this.artCount = 1});
   factory NowPlaying.fromJson(Map<String, dynamic> j) => NowPlaying(
         path: _str(j['path']),
         title: _str(j['title']),
         artist: _str(j['artist']),
         album: _str(j['album']),
         durationSec: _int(j['durationSec']),
+        artCount: (j['artCount'] as num?)?.toInt() ?? 1,
       );
   String get name => title.isNotEmpty ? title : path.split(RegExp(r'[\\/]')).last;
 }
@@ -29,6 +32,7 @@ class PlayerStatus {
   final bool isPlaying, isPaused, shuffle;
   final String repeat; // off | all | one
   final String? outputDeviceId;
+  final String currentFolder; // desktop's open folder path ('' = root/playlist view)
   PlayerStatus({
     this.nowPlaying,
     required this.positionSec,
@@ -40,6 +44,7 @@ class PlayerStatus {
     required this.shuffle,
     required this.repeat,
     this.outputDeviceId,
+    this.currentFolder = '',
   });
   factory PlayerStatus.fromJson(Map<String, dynamic> j) => PlayerStatus(
         nowPlaying: j['nowPlaying'] == null
@@ -54,6 +59,7 @@ class PlayerStatus {
         shuffle: _bool(j['shuffle']),
         repeat: _str(j['repeat']).isEmpty ? 'off' : _str(j['repeat']),
         outputDeviceId: j['outputDeviceId'] == null ? null : _str(j['outputDeviceId']),
+        currentFolder: _str(j['currentFolder']),
       );
   static PlayerStatus empty() => PlayerStatus(
       positionSec: 0,

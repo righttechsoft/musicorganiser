@@ -40,6 +40,9 @@ public class MainViewModel : ViewModelBase, IDisposable
     private string _artistSummary = string.Empty;
     private bool _isLoadingArtistInfo;
     private ImageSource? _albumCover;
+    private readonly List<ImageSource> _albumCovers = new();
+    private int _albumCoverIndex;
+    private System.Windows.Threading.DispatcherTimer? _albumCoverTimer;
     private OutputDeviceItem? _selectedOutputDevice;
     private bool _remoteSink;
     // Last bitrate the phone requested; used to prewarm the transcode cache.
@@ -421,7 +424,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
 
         MusicFiles.Clear();
-        AlbumCover = null;
+        ResetAlbumCover();
 
         _ = LoadFolderAsync(path, token);
         _ = LoadAlbumCoverAsync(path, token);
@@ -490,7 +493,7 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         CurrentFolderPath = folderPath;
         MusicFiles.Clear();
-        AlbumCover = null;
+        ResetAlbumCover();
         foreach (var f in files)
         {
             HookFile(f);
@@ -512,10 +515,28 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
+    /// <summary>Stops the cycling timer and clears the album cover state. Call before loading
+    /// a new folder/track's art (or when there is none).</summary>
+    private void ResetAlbumCover()
+    {
+        _albumCoverTimer?.Stop();
+        _albumCovers.Clear();
+        _albumCoverIndex = 0;
+        AlbumCover = null;
+    }
+
+    private void AlbumCoverTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_albumCovers.Count <= 1)
+            return;
+        _albumCoverIndex = (_albumCoverIndex + 1) % _albumCovers.Count;
+        AlbumCover = _albumCovers[_albumCoverIndex];
+    }
+
     private async Task LoadAlbumCoverAsync(string path, CancellationToken token)
     {
-        var bytes = await Task.Run(() => _metadataService.GetAlbumArt(path), token);
-        if (token.IsCancellationRequested || bytes == null)
+        var arts = await Task.Run(() => _metadataService.GetAlbumArts(path), token);
+        if (token.IsCancellationRequested)
             return;
 
         Application.Current?.Dispatcher.Invoke(() =>
@@ -523,20 +544,46 @@ public class MainViewModel : ViewModelBase, IDisposable
             if (token.IsCancellationRequested)
                 return;
 
-            try
+            _albumCoverTimer?.Stop();
+            _albumCovers.Clear();
+
+            foreach (var bytes in arts)
             {
-                var img = new BitmapImage();
-                using var ms = new MemoryStream(bytes);
-                img.BeginInit();
-                img.CacheOption = BitmapCacheOption.OnLoad;
-                img.StreamSource = ms;
-                img.EndInit();
-                img.Freeze();
-                AlbumCover = img;
+                try
+                {
+                    var img = new BitmapImage();
+                    using var ms = new MemoryStream(bytes);
+                    img.BeginInit();
+                    img.CacheOption = BitmapCacheOption.OnLoad;
+                    img.StreamSource = ms;
+                    img.EndInit();
+                    img.Freeze();
+                    _albumCovers.Add(img);
+                }
+                catch
+                {
+                    // skip images that fail to decode
+                }
             }
-            catch
+
+            _albumCoverIndex = 0;
+            AlbumCover = _albumCovers.Count > 0 ? _albumCovers[0] : null;
+
+            if (_albumCovers.Count > 1)
             {
-                AlbumCover = null;
+                if (_albumCoverTimer == null)
+                {
+                    _albumCoverTimer = new System.Windows.Threading.DispatcherTimer
+                    {
+                        Interval = TimeSpan.FromSeconds(5)
+                    };
+                    _albumCoverTimer.Tick += AlbumCoverTimer_Tick;
+                }
+                _albumCoverTimer.Start();
+            }
+            else
+            {
+                _albumCoverTimer?.Stop();
             }
         });
     }
@@ -974,7 +1021,7 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         CurrentFolderPath = playlist.Name;
         MusicFiles.Clear();
-        AlbumCover = null;
+        ResetAlbumCover();
 
         foreach (var f in DatabaseService.Instance.GetPlaylistFiles(playlist.Id))
         {

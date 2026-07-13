@@ -34,12 +34,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   AppState get app => widget.app;
 
+  // Last desktop folder we synced to. We follow the desktop only when THIS value
+  // changes — so the 1s poll doesn't yank the phone off wherever the user browsed,
+  // and our own mirror:true navigation (which moves the desktop) doesn't loop back.
+  String? _lastDesktopFolder;
+
   @override
   void initState() {
     super.initState();
     final pending = app.pendingLibraryPath;
     app.pendingLibraryPath = null;
-    _go(pending ?? '');
+    _lastDesktopFolder = app.status.currentFolder;
+    final desk = _lastDesktopFolder ?? '';
+    _go(pending ?? (desk.isNotEmpty ? desk : ''));
     app.addListener(_onApp);
   }
 
@@ -51,12 +58,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     super.dispose();
   }
 
-  // Consume an external "open this folder" request from History.
+  // Consume an external "open this folder" request from History, and mirror the
+  // desktop's open folder onto the phone when the desktop navigates.
   void _onApp() {
     final p = app.pendingLibraryPath;
     if (p != null) {
       app.pendingLibraryPath = null;
+      _lastDesktopFolder = app.status.currentFolder;
       _go(p);
+      return;
+    }
+    final df = app.status.currentFolder;
+    if (df.isNotEmpty && df != _lastDesktopFolder) {
+      _lastDesktopFolder = df; // record even if already there, so we don't re-follow
+      if (!_same(_path, df)) _go(df);
     }
   }
 

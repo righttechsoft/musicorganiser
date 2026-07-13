@@ -36,6 +36,9 @@ public class ControlApiService : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private bool _disposed;
 
+    // /status polls at 1Hz; only recompute the art count when the now-playing path changes.
+    private (string? Path, int Count) _artCountCache;
+
     public ControlApiService(MainViewModel vm, int port = DefaultPort)
     {
         _vm = vm;
@@ -238,7 +241,7 @@ public class ControlApiService : IDisposable
                 break;
             }
             case ("GET", "/file/art"):
-                await ServeArtAsync(ctx, req.QueryString["path"]);
+                await ServeArtAsync(ctx, req.QueryString["path"], req.QueryString["i"]);
                 break;
             case ("GET", "/file/audio"):
                 await ServeAudioAsync(ctx, req.QueryString["path"], req.QueryString["bitrate"]);
@@ -467,6 +470,7 @@ public class ControlApiService : IDisposable
                     artist = np.Artist,
                     album = np.Album,
                     durationSec = (int)_vm.TotalDuration.TotalSeconds,
+                    artCount = GetArtCount(np.FullPath),
                 },
                 positionSec = (int)_vm.CurrentPosition.TotalSeconds,
                 durationSec = (int)_vm.TotalDuration.TotalSeconds,
@@ -475,10 +479,39 @@ public class ControlApiService : IDisposable
                 volume = (int)_vm.Volume,
                 systemVolume = (int)_vm.SystemVolume,
                 outputDeviceId = _vm.RemoteSink ? ThisDeviceId : _vm.SelectedOutputDevice?.Id,
+                currentFolder = _vm.IsPlaylistView ? "" : _vm.CurrentFolderPath,
                 shuffle = _vm.ShuffleEnabled,
                 repeat = _vm.Repeat.ToString().ToLowerInvariant(),
             };
         });
+    }
+
+    // Number of art candidates for the now-playing track: embedded picture (0 or 1) +
+    // folder image files. Cached per-path so the 1Hz /status poll only re-reads tags/
+    // enumerates the folder when the track actually changes.
+    private int GetArtCount(string path)
+    {
+        if (_artCountCache.Path == path)
+            return _artCountCache.Count;
+
+        var count = 1;
+        try
+        {
+            var embedded = 0;
+            using (var tag = TagLib.File.Create(path))
+            {
+                if (tag.Tag.Pictures.Length > 0 && tag.Tag.Pictures[0].Data.Count > 0)
+                    embedded = 1;
+            }
+            count = embedded + MusicMetadataService.GetFolderImagePaths(Path.GetDirectoryName(path) ?? "").Count;
+        }
+        catch
+        {
+            count = 1;
+        }
+
+        _artCountCache = (path, count);
+        return count;
     }
 
     // Must run inside OnUi — enumerates the VM's ObservableCollection.
@@ -668,34 +701,57 @@ public class ControlApiService : IDisposable
         ".png" => "image/png",
         ".ico" => "image/x-icon",
         ".svg" => "image/svg+xml",
+        // Folder cover-art formats (MusicMetadataService.ImageExtensions).
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".bmp" => "image/bmp",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
         _ => "application/octet-stream",
     };
 
-    // ---- Album art (embedded cover via TagLib) ----
-    // Streams the track's first embedded picture; 404 when there is none so the
-    // client can show its "no album art" placeholder.
-    private static async Task ServeArtAsync(HttpListenerContext ctx, string? path)
+    // ---- Album art (embedded cover, or a folder image file, via TagLib) ----
+    // Candidate list for the track: [embedded picture if present] + [folder image files].
+    // Streams candidate `i` (default 0); 404 when out of range so the client can show its
+    // "no album art" placeholder. i=0 behaves exactly as before when embedded art exists,
+    // since callers cache by URL.
+    private static async Task ServeArtAsync(HttpListenerContext ctx, string? path, string? indexStr)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
             await WriteError(ctx, "not found", 404);
             return;
         }
+        var index = int.TryParse(indexStr, out var i) ? i : 0;
         try
         {
-            byte[]? data = null;
-            var mime = "image/jpeg";
+            byte[]? embedded = null;
+            var embeddedMime = "image/jpeg";
             // ponytail: full embedded image; client caches by URL. Resize server-side only if LAN bandwidth bites.
             using (var tag = TagLib.File.Create(path))
             {
                 var pics = tag.Tag.Pictures;
-                if (pics.Length > 0)
+                if (pics.Length > 0 && pics[0].Data.Count > 0)
                 {
-                    data = pics[0].Data.Data;
-                    if (!string.IsNullOrEmpty(pics[0].MimeType)) mime = pics[0].MimeType;
+                    embedded = pics[0].Data.Data;
+                    if (!string.IsNullOrEmpty(pics[0].MimeType)) embeddedMime = pics[0].MimeType;
                 }
             }
-            if (data == null || data.Length == 0) { await WriteError(ctx, "no art", 404); return; }
+
+            byte[] data;
+            string mime;
+            if (embedded != null && index == 0)
+            {
+                data = embedded;
+                mime = embeddedMime;
+            }
+            else
+            {
+                var images = MusicMetadataService.GetFolderImagePaths(Path.GetDirectoryName(path) ?? "");
+                var imgIndex = embedded != null ? index - 1 : index;
+                if (imgIndex < 0 || imgIndex >= images.Count) { await WriteError(ctx, "no art", 404); return; }
+                data = File.ReadAllBytes(images[imgIndex]);
+                mime = ContentType(images[imgIndex]);
+            }
 
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = mime;

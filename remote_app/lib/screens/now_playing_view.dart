@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import '../api_client.dart';
 import '../app_state.dart';
 import '../models.dart';
 import '../theme.dart';
@@ -165,7 +167,7 @@ class _NowPlayingViewState extends State<NowPlayingView> {
     return Center(
       child: AspectRatio(
         aspectRatio: 1,
-        child: AlbumArt(url: app.api!.artUrl(np.path), big: true, radius: 16, expand: true),
+        child: _CyclingArt(api: app.api!, path: np.path, artCount: np.artCount),
       ),
     );
   }
@@ -455,4 +457,55 @@ class _NowPlayingViewState extends State<NowPlayingView> {
         overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
       );
+}
+
+/// Big now-playing art. Cycles through every candidate image (one every 5s) when the
+/// track's folder has more than one; static otherwise.
+class _CyclingArt extends StatefulWidget {
+  final ApiClient api;
+  final String path;
+  final int artCount;
+  const _CyclingArt({required this.api, required this.path, required this.artCount});
+
+  @override
+  State<_CyclingArt> createState() => _CyclingArtState();
+}
+
+class _CyclingArtState extends State<_CyclingArt> {
+  int _index = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _arm();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CyclingArt oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) {
+      _index = 0;
+      _arm();
+    }
+  }
+
+  void _arm() {
+    _timer?.cancel();
+    _timer = widget.artCount > 1
+        ? Timer.periodic(const Duration(seconds: 5),
+            (_) => setState(() => _index = (_index + 1) % widget.artCount))
+        : null;
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlbumArt(url: widget.api.artUrl(widget.path, _index), big: true, radius: 16, expand: true);
+  }
 }

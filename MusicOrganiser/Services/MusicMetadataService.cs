@@ -63,32 +63,49 @@ public class MusicMetadataService
     }
 
     /// <summary>
-    /// Finds album art for a folder. Priority: image file in folder,
-    /// embedded picture in a music file, image file in an immediate subfolder.
+    /// Finds album art candidates for a folder. Priority: image files in the folder,
+    /// embedded picture in a music file, image files in an immediate subfolder.
+    /// Returns every candidate within the winning tier (used for cover cycling).
     /// </summary>
-    public byte[]? GetAlbumArt(string folderPath)
+    public List<byte[]> GetAlbumArts(string folderPath)
     {
-        if (!Directory.Exists(folderPath))
-            return null;
+        // ponytail: caps at 12 images so a folder of 200 scans doesn't get decoded into RAM.
+        const int MaxImages = 12;
 
-        // 1. Image file in the folder itself
-        var art = FindImageInFolder(folderPath);
-        if (art != null)
-            return art;
+        var result = new List<byte[]>();
+        if (!Directory.Exists(folderPath))
+            return result;
+
+        // 1. Image files in the folder itself
+        foreach (var imgPath in GetFolderImagePaths(folderPath))
+        {
+            if (result.Count >= MaxImages)
+                break;
+            try { result.Add(System.IO.File.ReadAllBytes(imgPath)); }
+            catch { /* skip files that fail to read */ }
+        }
+        if (result.Count > 0)
+            return result;
 
         // 2. Embedded picture from a music file in the folder
-        art = GetEmbeddedArt(folderPath);
-        if (art != null)
-            return art;
+        var embedded = GetEmbeddedArt(folderPath);
+        if (embedded != null)
+            return new List<byte[]> { embedded };
 
-        // 3. Image file in an immediate subfolder
+        // 3. Image files in immediate subfolders
         try
         {
             foreach (var sub in Directory.EnumerateDirectories(folderPath))
             {
-                var subArt = FindImageInFolder(sub);
-                if (subArt != null)
-                    return subArt;
+                foreach (var imgPath in GetFolderImagePaths(sub))
+                {
+                    if (result.Count >= MaxImages)
+                        break;
+                    try { result.Add(System.IO.File.ReadAllBytes(imgPath)); }
+                    catch { /* skip files that fail to read */ }
+                }
+                if (result.Count >= MaxImages)
+                    break;
             }
         }
         catch
@@ -96,10 +113,12 @@ public class MusicMetadataService
             // ignore enumeration errors
         }
 
-        return null;
+        return result;
     }
 
-    private static byte[]? FindImageInFolder(string folderPath)
+    /// <summary>Returns all image files directly in a folder, preferred cover names first
+    /// (e.g. "cover", "folder"), then the rest — each group ordered by filename.</summary>
+    public static List<string> GetFolderImagePaths(string folderPath)
     {
         try
         {
@@ -107,17 +126,18 @@ public class MusicMetadataService
                 .Where(f => ImageExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
                 .ToList();
 
-            if (images.Count == 0)
-                return null;
+            var preferred = images
+                .Where(f => PreferredCoverNames.Contains(Path.GetFileNameWithoutExtension(f).ToLowerInvariant()))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+            var rest = images
+                .Where(f => !PreferredCoverNames.Contains(Path.GetFileNameWithoutExtension(f).ToLowerInvariant()))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
 
-            var preferred = images.FirstOrDefault(f =>
-                PreferredCoverNames.Contains(Path.GetFileNameWithoutExtension(f).ToLowerInvariant()));
-
-            return System.IO.File.ReadAllBytes(preferred ?? images[0]);
+            return preferred.Concat(rest).ToList();
         }
         catch
         {
-            return null;
+            return new List<string>();
         }
     }
 
