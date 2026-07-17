@@ -493,9 +493,19 @@ class _CyclingArtState extends State<_CyclingArt> {
   void _arm() {
     _timer?.cancel();
     _timer = widget.artCount > 1
-        ? Timer.periodic(const Duration(seconds: 5),
-            (_) => setState(() => _index = (_index + 1) % widget.artCount))
+        ? Timer.periodic(const Duration(seconds: 15), (_) => _advance())
         : null;
+  }
+
+  /// Preload the next candidate before swapping so the crossfade shows the image, not a placeholder.
+  Future<void> _advance() async {
+    final next = (_index + 1) % widget.artCount;
+    try {
+      await precacheImage(NetworkImage(widget.api.artUrl(widget.path, next)), context);
+    } catch (_) {
+      // fall through: the Image's errorBuilder handles a bad candidate
+    }
+    if (mounted) setState(() => _index = next);
   }
 
   @override
@@ -506,6 +516,15 @@ class _CyclingArtState extends State<_CyclingArt> {
 
   @override
   Widget build(BuildContext context) {
-    return AlbumArt(url: widget.api.artUrl(widget.path, _index), big: true, radius: 16, expand: true);
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 1200),
+      child: AlbumArt(
+        key: ValueKey(_index),
+        url: widget.api.artUrl(widget.path, _index),
+        big: true,
+        radius: 16,
+        expand: true,
+      ),
+    );
   }
 }

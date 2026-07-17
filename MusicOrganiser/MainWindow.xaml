@@ -436,8 +436,22 @@
             <Grid Grid.Row="1" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged"
                   MouseLeftButtonUp="CoverHost_MouseLeftButtonUp">
             <!-- Album Cover (behind the file list) -->
+            <!-- Holds the outgoing cover so art changes crossfade instead of popping. -->
+            <Image x:Name="AlbumCoverGhost"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   MaxWidth="450" MaxHeight="450"
+                   Margin="40,0,40,0"
+                   Opacity="0"
+                   IsHitTestVisible="False"
+                   RenderOptions.BitmapScalingMode="HighQuality">
+                <Image.RenderTransform>
+                    <TranslateTransform x:Name="AlbumCoverGhostOffset"/>
+                </Image.RenderTransform>
+            </Image>
             <Image x:Name="AlbumCoverImage"
-                   Source="{Binding AlbumCover}"
+                   Source="{Binding AlbumCover, NotifyOnTargetUpdated=True}"
                    Stretch="Uniform"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Top"
@@ -445,7 +459,12 @@
                    Margin="40,0,40,0"
                    IsHitTestVisible="False"
                    RenderOptions.BitmapScalingMode="HighQuality"
-                   SizeChanged="AlbumCoverImage_SizeChanged"/>
+                   SizeChanged="AlbumCoverImage_SizeChanged"
+                   TargetUpdated="AlbumCoverImage_TargetUpdated">
+                <Image.RenderTransform>
+                    <TranslateTransform x:Name="AlbumCoverImageOffset"/>
+                </Image.RenderTransform>
+            </Image>
 
             <DataGrid x:Name="MusicFilesGrid"
                       Background="Transparent"

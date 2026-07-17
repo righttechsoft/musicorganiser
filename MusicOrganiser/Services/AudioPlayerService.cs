@@ -4,6 +4,7 @@ using System.Timers;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace MusicOrganiser.Services;
 
@@ -13,6 +14,10 @@ public class AudioPlayerService : IDisposable
     private NotificationClient? _notificationClient;
     private WasapiOut? _output;
     private MediaFoundationResampler? _resampler;
+    // In-app gain applied at the TAIL of the pipeline (after the resampler) so volume/mute
+    // changes are audible within WasapiOut's buffer (~100ms) instead of after the resampler's
+    // ~1s source buffer. Do not move this back onto AudioFileReader.
+    private VolumeSampleProvider? _gain;
     private AudioFileReader? _audioFile;
     private MMDevice? _selectedDevice;
     // The default-endpoint device resolved for the current playback (when no device is
@@ -54,9 +59,9 @@ public class AudioPlayerService : IDisposable
         set
         {
             _volume = Math.Clamp(value, 0f, 1f);
-            if (_audioFile != null)
+            if (_gain != null)
             {
-                _audioFile.Volume = _localMuted ? 0f : _volume;
+                _gain.Volume = _localMuted ? 0f : _volume;
             }
         }
     }
@@ -69,9 +74,9 @@ public class AudioPlayerService : IDisposable
         set
         {
             _localMuted = value;
-            if (_audioFile != null)
+            if (_gain != null)
             {
-                _audioFile.Volume = _localMuted ? 0f : _volume;
+                _gain.Volume = _localMuted ? 0f : _volume;
             }
         }
     }
@@ -273,7 +278,6 @@ public class AudioPlayerService : IDisposable
         try
         {
             _audioFile = new AudioFileReader(filePath);
-            _audioFile.Volume = _localMuted ? 0f : _volume;
 
             var (device, ownsDevice) = GetActiveDevice();
             if (device == null)
@@ -292,9 +296,13 @@ public class AudioPlayerService : IDisposable
             var mixFormat = device.AudioClient.MixFormat;
             _resampler = new MediaFoundationResampler(
                 _audioFile, WaveFormat.CreateIeeeFloatWaveFormat(mixFormat.SampleRate, 2));
+            _gain = new VolumeSampleProvider(_resampler.ToSampleProvider())
+            {
+                Volume = _localMuted ? 0f : _volume
+            };
             IWaveProvider outProvider = mixFormat.Channels > 2
-                ? new StereoToSurround(_resampler.ToSampleProvider(), mixFormat)
-                : _resampler;
+                ? new StereoToSurround(_gain, mixFormat)
+                : new SampleToWaveProvider(_gain);
             _output = new WasapiOut(device, AudioClientShareMode.Shared, !_pushModeFallback, 100);
             _output.Init(outProvider);
             _output.PlaybackStopped += OnPlaybackStopped;
@@ -371,6 +379,7 @@ public class AudioPlayerService : IDisposable
             _resampler.Dispose();
             _resampler = null;
         }
+        _gain = null;
 
         if (_audioFile != null)
         {

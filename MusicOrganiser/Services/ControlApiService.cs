@@ -486,9 +486,10 @@ public class ControlApiService : IDisposable
         });
     }
 
-    // Number of art candidates for the now-playing track: embedded picture (0 or 1) +
-    // folder image files. Cached per-path so the 1Hz /status poll only re-reads tags/
-    // enumerates the folder when the track actually changes.
+    // Number of art candidates for the now-playing track: 1 if it has an embedded picture
+    // (folder images are no longer candidates), otherwise the folder's image file count.
+    // Cached per-path so the 1Hz /status poll only re-reads tags/enumerates the folder
+    // when the track actually changes.
     private int GetArtCount(string path)
     {
         if (_artCountCache.Path == path)
@@ -503,7 +504,7 @@ public class ControlApiService : IDisposable
                 if (tag.Tag.Pictures.Length > 0 && tag.Tag.Pictures[0].Data.Count > 0)
                     embedded = 1;
             }
-            count = embedded + MusicMetadataService.GetFolderImagePaths(Path.GetDirectoryName(path) ?? "").Count;
+            count = embedded > 0 ? 1 : MusicMetadataService.GetFolderImagePaths(Path.GetDirectoryName(path) ?? "").Count;
         }
         catch
         {
@@ -710,10 +711,10 @@ public class ControlApiService : IDisposable
     };
 
     // ---- Album art (embedded cover, or a folder image file, via TagLib) ----
-    // Candidate list for the track: [embedded picture if present] + [folder image files].
+    // Candidate list for the track: [embedded picture] if present, else [folder image files].
     // Streams candidate `i` (default 0); 404 when out of range so the client can show its
-    // "no album art" placeholder. i=0 behaves exactly as before when embedded art exists,
-    // since callers cache by URL.
+    // "no album art" placeholder. When the track has an embedded picture it is served for
+    // every index (it is the only candidate); folder images are only used as a fallback.
     private static async Task ServeArtAsync(HttpListenerContext ctx, string? path, string? indexStr)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -739,7 +740,7 @@ public class ControlApiService : IDisposable
 
             byte[] data;
             string mime;
-            if (embedded != null && index == 0)
+            if (embedded != null)
             {
                 data = embedded;
                 mime = embeddedMime;
@@ -747,10 +748,9 @@ public class ControlApiService : IDisposable
             else
             {
                 var images = MusicMetadataService.GetFolderImagePaths(Path.GetDirectoryName(path) ?? "");
-                var imgIndex = embedded != null ? index - 1 : index;
-                if (imgIndex < 0 || imgIndex >= images.Count) { await WriteError(ctx, "no art", 404); return; }
-                data = File.ReadAllBytes(images[imgIndex]);
-                mime = ContentType(images[imgIndex]);
+                if (index < 0 || index >= images.Count) { await WriteError(ctx, "no art", 404); return; }
+                data = File.ReadAllBytes(images[index]);
+                mime = ContentType(images[index]);
             }
 
             ctx.Response.StatusCode = 200;

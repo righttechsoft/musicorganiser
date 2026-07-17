@@ -5,8 +5,10 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using Microsoft.Win32;
 using MusicOrganiser.Dialogs;
 using MusicOrganiser.Models;
@@ -68,11 +70,42 @@ public partial class MainWindow : Window
 
     private void AlbumCoverImage_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
 
+    private ImageSource? _previousCover;
+
+    /// <summary>Crossfades cover changes: the outgoing image is parked in the ghost and faded
+    /// out while the new bound image fades in.</summary>
+    private void AlbumCoverImage_TargetUpdated(object sender, DataTransferEventArgs e)
+    {
+        var incoming = AlbumCoverImage.Source;
+        var outgoing = _previousCover;
+        _previousCover = incoming;
+
+        if (incoming == null)
+        {
+            AlbumCoverGhost.Source = null;
+            AlbumCoverGhost.BeginAnimation(OpacityProperty, null);
+            AlbumCoverGhost.Opacity = 0;
+            return;
+        }
+
+        var dur = new Duration(TimeSpan.FromMilliseconds(1200));
+
+        if (outgoing != null)
+        {
+            AlbumCoverGhost.Source = outgoing;
+            AlbumCoverGhostOffset.Y = AlbumCoverImageOffset.Y;   // park the ghost where the outgoing cover sat
+            AlbumCoverGhost.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, dur));
+        }
+
+        AlbumCoverImage.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, dur));
+    }
+
     /// <summary>
     /// Keeps the album cover vertically centred, but shifts it down so the file
     /// rows don't overlap it while there is still room beneath. Once the image
     /// reaches the bottom of the area, it stops and the semi-transparent rows
-    /// overlay it instead.
+    /// overlay it instead. The shift is applied as a render transform, not a
+    /// Margin, so it doesn't affect layout.
     /// </summary>
     private void UpdateAlbumCoverPosition()
     {
@@ -90,9 +123,10 @@ public partial class MainWindow : Window
 
         double top = Math.Min(maxTop, Math.Max(centeredTop, rowsBottom));
 
-        var m = AlbumCoverImage.Margin;
-        if (Math.Abs(m.Top - top) > 0.5)
-            AlbumCoverImage.Margin = new Thickness(m.Left, top, m.Right, m.Bottom);
+        // ponytail: must stay a RenderTransform, not a Margin — Margin feeds back into the
+        // Uniform-stretch measure and shrinks the image on every pass.
+        if (Math.Abs(AlbumCoverImageOffset.Y - top) > 0.5)
+            AlbumCoverImageOffset.Y = top;
     }
 
     private double GetRowsBottom()

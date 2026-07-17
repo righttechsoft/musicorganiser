@@ -63,11 +63,12 @@ public class MusicMetadataService
     }
 
     /// <summary>
-    /// Finds album art candidates for a folder. Priority: image files in the folder,
-    /// embedded picture in a music file, image files in an immediate subfolder.
+    /// Finds album art candidates for a folder. Priority: the current track's own embedded
+    /// pictures, then image files in the folder, then embedded picture in a music file,
+    /// then image files in an immediate subfolder.
     /// Returns every candidate within the winning tier (used for cover cycling).
     /// </summary>
-    public List<byte[]> GetAlbumArts(string folderPath)
+    public List<byte[]> GetAlbumArts(string folderPath, string? currentFilePath = null)
     {
         // ponytail: caps at 12 images so a folder of 200 scans doesn't get decoded into RAM.
         const int MaxImages = 12;
@@ -75,6 +76,14 @@ public class MusicMetadataService
         var result = new List<byte[]>();
         if (!Directory.Exists(folderPath))
             return result;
+
+        // 0. The current track's own embedded pictures beat any folder image.
+        if (!string.IsNullOrEmpty(currentFilePath))
+        {
+            var own = GetEmbeddedArts(currentFilePath, MaxImages);
+            if (own.Count > 0)
+                return own;
+        }
 
         // 1. Image files in the folder itself
         foreach (var imgPath in GetFolderImagePaths(folderPath))
@@ -169,6 +178,29 @@ public class MusicMetadataService
         }
 
         return null;
+    }
+
+    /// <summary>All embedded pictures in one music file (empty if none / unreadable).</summary>
+    private static List<byte[]> GetEmbeddedArts(string filePath, int max)
+    {
+        var result = new List<byte[]>();
+        try
+        {
+            using var tagFile = TagLib.File.Create(filePath);
+            foreach (var pic in tagFile.Tag.Pictures)
+            {
+                if (result.Count >= max)
+                    break;
+                if (pic.Data.Count > 0)
+                    result.Add(pic.Data.Data);
+            }
+        }
+        catch
+        {
+            // skip files that fail to read
+        }
+
+        return result;
     }
 
     public MusicFile? ReadMetadata(string filePath)

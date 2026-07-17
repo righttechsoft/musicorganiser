@@ -43,10 +43,14 @@ public class MainViewModel : ViewModelBase, IDisposable
     private readonly List<ImageSource> _albumCovers = new();
     private int _albumCoverIndex;
     private System.Windows.Threading.DispatcherTimer? _albumCoverTimer;
+    private CancellationTokenSource? _albumCoverCts;
     private OutputDeviceItem? _selectedOutputDevice;
     private bool _remoteSink;
     // Last bitrate the phone requested; used to prewarm the transcode cache.
     private int _lastStreamBitrate = AudioStreamService.DefaultBitrate;
+    // ponytail: debounce settings.json writes while the volume slider is dragged — the setter
+    // fires per tick and Save() is a synchronous File.WriteAllText.
+    private System.Windows.Threading.DispatcherTimer? _volumeSaveTimer;
 
     public FolderTreeViewModel FolderTree { get; }
     public RecentFolders RecentFolders { get; }
@@ -156,9 +160,27 @@ public class MainViewModel : ViewModelBase, IDisposable
         {
             _audioPlayer.Volume = (float)(value / 100);
             _appSettings.Volume = (int)value;
-            _appSettings.Save();
+            SaveSettingsDebounced();
             OnPropertyChanged(nameof(Volume));
         }
+    }
+
+    private void SaveSettingsDebounced()
+    {
+        if (_volumeSaveTimer == null)
+        {
+            _volumeSaveTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            _volumeSaveTimer.Tick += (_, _) =>
+            {
+                _volumeSaveTimer!.Stop();
+                _appSettings.Save();
+            };
+        }
+        _volumeSaveTimer.Stop();
+        _volumeSaveTimer.Start();
     }
 
     // Windows master volume of the active output device (0..100). Not persisted — live OS value.
@@ -427,7 +449,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         ResetAlbumCover();
 
         _ = LoadFolderAsync(path, token);
-        _ = LoadAlbumCoverAsync(path, token);
+        _ = LoadAlbumCoverAsync(path, null);
     }
 
 
@@ -505,7 +527,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             SelectedFile = MusicFiles[0];
             PlayFile(MusicFiles[0]);
             // Cover comes from the playing track's folder (the clicked folder may hold only subfolders).
-            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(MusicFiles[0].FullPath) ?? folderPath, token);
+            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(MusicFiles[0].FullPath) ?? folderPath, MusicFiles[0].FullPath);
         }
         }
         finally
@@ -519,6 +541,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     /// a new folder/track's art (or when there is none).</summary>
     private void ResetAlbumCover()
     {
+        _albumCoverCts?.Cancel();
         _albumCoverTimer?.Stop();
         _albumCovers.Clear();
         _albumCoverIndex = 0;
@@ -533,9 +556,21 @@ public class MainViewModel : ViewModelBase, IDisposable
         AlbumCover = _albumCovers[_albumCoverIndex];
     }
 
-    private async Task LoadAlbumCoverAsync(string path, CancellationToken token)
+    private async Task LoadAlbumCoverAsync(string folderPath, string? filePath)
     {
-        var arts = await Task.Run(() => _metadataService.GetAlbumArts(path), token);
+        _albumCoverCts?.Cancel();
+        _albumCoverCts = new CancellationTokenSource();
+        var token = _albumCoverCts.Token;
+
+        List<byte[]> arts;
+        try
+        {
+            arts = await Task.Run(() => _metadataService.GetAlbumArts(folderPath, filePath), token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         if (token.IsCancellationRequested)
             return;
 
@@ -575,7 +610,7 @@ public class MainViewModel : ViewModelBase, IDisposable
                 {
                     _albumCoverTimer = new System.Windows.Threading.DispatcherTimer
                     {
-                        Interval = TimeSpan.FromSeconds(5)
+                        Interval = TimeSpan.FromSeconds(15)
                     };
                     _albumCoverTimer.Tick += AlbumCoverTimer_Tick;
                 }
@@ -707,6 +742,9 @@ public class MainViewModel : ViewModelBase, IDisposable
             NowPlaying = file;
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
+
+            // Cover follows the track: its embedded art wins over the folder's images.
+            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(file.FullPath) ?? "", file.FullPath);
 
             // Phone is the sink: warm the transcode cache for THIS track and the NEXT one,
             // so the phone's stream request (and the upcoming track change) serve instantly.
@@ -1142,6 +1180,12 @@ public class MainViewModel : ViewModelBase, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        if (_volumeSaveTimer?.IsEnabled == true)
+        {
+            _volumeSaveTimer.Stop();
+            _appSettings.Save();
+        }
 
         _controlApi.Dispose();
         _audioPlayer.PositionChanged -= OnPositionChanged;
