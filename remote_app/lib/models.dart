@@ -8,13 +8,16 @@ class NowPlaying {
   final String path, title, artist, album;
   final int durationSec;
   final int artCount;
+  final bool hasLyrics, synced;
   NowPlaying(
       {required this.path,
       required this.title,
       required this.artist,
       required this.album,
       required this.durationSec,
-      this.artCount = 1});
+      this.artCount = 1,
+      this.hasLyrics = false,
+      this.synced = false});
   factory NowPlaying.fromJson(Map<String, dynamic> j) => NowPlaying(
         path: _str(j['path']),
         title: _str(j['title']),
@@ -22,6 +25,8 @@ class NowPlaying {
         album: _str(j['album']),
         durationSec: _int(j['durationSec']),
         artCount: (j['artCount'] as num?)?.toInt() ?? 1,
+        hasLyrics: _bool(j['hasLyrics']),
+        synced: _bool(j['synced']),
       );
   String get name => title.isNotEmpty ? title : path.split(RegExp(r'[\\/]')).last;
 }
@@ -119,15 +124,18 @@ class TrackFile {
 }
 
 class FolderEntry {
-  final String name, path;
+  final String name, path, tags;
   final int? createdSec, modifiedSec; // filesystem times; null for drives
-  FolderEntry({required this.name, required this.path, this.createdSec, this.modifiedSec});
+  FolderEntry({required this.name, required this.path, this.tags = '', this.createdSec, this.modifiedSec});
   factory FolderEntry.fromJson(Map<String, dynamic> j) => FolderEntry(
         name: _str(j['name']),
         path: _str(j['path']),
+        tags: _str(j['tags']),
         createdSec: j['createdSec'] == null ? null : _int(j['createdSec']),
         modifiedSec: j['modifiedSec'] == null ? null : _int(j['modifiedSec']),
       );
+  List<String> get tagList =>
+      tags.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
 }
 
 class BrowseResult {
@@ -165,4 +173,81 @@ class HistoryItem {
   HistoryItem({required this.path, required this.displayName});
   factory HistoryItem.fromJson(Map<String, dynamic> j) =>
       HistoryItem(path: _str(j['path']), displayName: _str(j['displayName']));
+}
+
+/// One timed karaoke line, parsed from an LRC file.
+class LyricLine {
+  final Duration time;
+  final String text;
+  const LyricLine(this.time, this.text);
+}
+
+class LyricsData {
+  final String? plain;
+  final String? lrc;
+  final String? source; // lrclib | ai | whisper | manual | embedded
+  final bool synced;
+  LyricsData({this.plain, this.lrc, this.source, this.synced = false});
+  factory LyricsData.fromJson(Map<String, dynamic> j) {
+    final plain = _str(j['plain']);
+    final lrc = _str(j['lrc']);
+    return LyricsData(
+      plain: plain.isEmpty ? null : plain,
+      lrc: lrc.isEmpty ? null : lrc,
+      source: j['source'] == null ? null : _str(j['source']),
+      synced: _bool(j['synced']),
+    );
+  }
+  bool get hasAny => (plain?.isNotEmpty ?? false) || (lrc?.isNotEmpty ?? false);
+
+  /// Parsed `[mm:ss.xx] text` lines from [lrc], sorted by time; empty when unsynced
+  /// or unparsable. ponytail: only a single leading timestamp per line is handled —
+  /// real-world LRC occasionally repeats a line under multiple tags
+  /// (`[00:12.00][00:45.00] text`); those extra tags are ignored here.
+  List<LyricLine> get lines {
+    final raw = lrc;
+    if (raw == null || raw.isEmpty) return const [];
+    final re = RegExp(r'^\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$');
+    final out = <LyricLine>[];
+    for (final line in raw.split('\n')) {
+      final m = re.firstMatch(line.trimRight());
+      if (m == null) continue;
+      final min = int.parse(m.group(1)!);
+      final sec = int.parse(m.group(2)!);
+      final frac = (m.group(3) ?? '0').padRight(3, '0').substring(0, 3);
+      out.add(LyricLine(
+          Duration(minutes: min, seconds: sec, milliseconds: int.parse(frac)), m.group(4)!.trim()));
+    }
+    out.sort((a, b) => a.time.compareTo(b.time));
+    return out;
+  }
+}
+
+/// One entry from GET /tags: a folder-tag vocabulary name and how many folders carry it.
+class TagUsage {
+  final String name;
+  final int folderCount;
+  TagUsage({required this.name, required this.folderCount});
+  factory TagUsage.fromJson(Map<String, dynamic> j) =>
+      TagUsage(name: _str(j['name']), folderCount: _int(j['folderCount']));
+}
+
+class FolderTagSuggestion {
+  final List<String>? suggested; // null = AI unavailable
+  final String current; // csv of the folder's currently saved tags
+  FolderTagSuggestion({this.suggested, required this.current});
+  factory FolderTagSuggestion.fromJson(Map<String, dynamic> j) => FolderTagSuggestion(
+        suggested: j['suggested'] == null ? null : (j['suggested'] as List).map((e) => e.toString()).toList(),
+        current: _str(j['current']),
+      );
+}
+
+/// One file returned by the desktop's recursive /files?path=&recursive=1 listing (used by the
+/// bulk-tag band preview player). [relativePath] is relative to the requested folder.
+class BandFile {
+  final String path;
+  final String relativePath;
+  BandFile({required this.path, required this.relativePath});
+  factory BandFile.fromJson(Map<String, dynamic> j) =>
+      BandFile(path: _str(j['path']), relativePath: _str(j['relativePath']));
 }

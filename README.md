@@ -7,7 +7,8 @@ A Windows desktop application for managing and playing music files, built with C
 ### File Browser
 - Tree view of all drives (local, network, USB, CD/DVD)
 - Async folder loading for responsive UI
-- Filter folders by name, with a one-click clear (×) button
+- Filter folders by name, with a one-click clear (×) button; a **^** button jumps up to the parent folder
+- Filter folders by tag — multi-select dropdown, shows folders matching any selected tag
 - Sort folders by Name, Creation Date, or Modified Date (ascending/descending)
 - Long sorts run off the UI thread with a busy overlay — the app never freezes on large trees
 - Reliable scroll-to-selection when navigating the tree
@@ -15,7 +16,8 @@ A Windows desktop application for managing and playing music files, built with C
 ### Music Library
 - Grid view of music files in the selected folder
 - Displays metadata: file name, title, artist, album, duration, bitrate, genre, year
-- Highlights currently playing track
+- Clear, stable row states: a faint hover wash, an Explorer-blue selection that stays visible when the grid loses focus, and a stronger highlight (plus bold text and a left accent bar) for the currently playing track, which outranks both so it never flickers under the mouse
+- Fixed row height, so revealing the inline star/tag editors on hover never nudges the list under your cursor
 - Supported formats: MP3, FLAC, WAV, WMA, AAC, OGG, M4A
 - Album cover displayed behind the file grid; when a folder has several cover images, the display cycles through them (also on the mobile app's now-playing screen)
 
@@ -24,6 +26,9 @@ A Windows desktop application for managing and playing music files, built with C
 - Free-form comma-separated tags for both tracks and folders
 - Filled stars and existing tags show inline; hover a row to reveal the editable stars/tag box
 - Ratings and tags are stored in the local cache and survive folder rescans
+- **AI tag suggestions** — right-click a folder → *Tag...* to have Claude identify the band from the folder/album names (checking Bandcamp's own genre tags first) and suggest genre tags, reusing the vocabulary already in your library; add/remove suggestions before saving (also available from the mobile app's folder menu)
+- **Bulk tag** — right-click a parent folder → *Bulk tag subfolders...* to AI-tag every untagged band folder inside it at once, in reviewable batches of 20, with a per-band preview player to audition tracks while you review (also available from the mobile app)
+- **Manage tags** — *Manage tags...* in the folder tree's tag filter popup lists every tag with its folder count and lets you delete a tag or merge it into another, both irreversible and confirmed (also available from the mobile app's tag filter sheet)
 
 ### Local Cache (SQLite)
 - Files and folders are cached in a local SQLite database (WAL mode) at `%APPDATA%\MusicOrganiser\cache.db`
@@ -41,9 +46,17 @@ A Windows desktop application for managing and playing music files, built with C
 - Robust Bluetooth playback: push-mode fallback for endpoints that stall in event mode, and no more hangs when pressing play right after a Bluetooth device connects
 - Stereo-to-surround upmix so 2-channel audio plays correctly on 5.1/7.1 devices
 
+### Lyrics & Karaoke Mode
+- **Find lyrics on request** — a lyrics panel under the file grid; click *Find* to fetch. Three free, no-key sources are tried in order for synced lyrics — [LRCLIB](https://lrclib.net), then [LRCMux](https://lrcmux.dev) (an aggregator over Genius/KuGou/Musixmatch/NetEase/YouTube Music), then [SyncLRC](https://synclrc.dev) — and if all three miss, an AI web search looks for publicly-available lyrics. If none can be provided, you drop straight into a paste box to add your own. A track any source flags as instrumental stops the search there
+- **Karaoke highlight** — the current line highlights (bold + a colored band) and the view auto-scrolls to keep "now" centered; seeking jumps to the right line. A big-letter karaoke view is a click away
+- **Time-proportional sync editor** — lyric lines are laid out by their timestamps (big gaps where the song is instrumental), with a moving playhead line. Hand-time any line by tapping *⏺ now* as you hear it (latency-compensated) or nudge ±0.2s; changing one line ripples the rest. Auto-scroll pauses while you're working on a line so it never moves under you. Edits auto-save
+- **Whisper sync** — for tracks with only plain lyrics, *Sync* aligns them to the audio using a bundled Whisper.net speech model (no Python); untimed tails are spread across the song, then fine-tune by hand
+- Lyrics are stored in the local cache keyed by file path and load instantly on replay; the mobile app shows the same karaoke view and can find/edit/clear lyrics too
+
 ### Mobile Remote App
 A companion Flutter app (`remote_app/`) controls the desktop over your local network via a built-in HTTP API (port 8787):
-- Browse the library (search + sort), control playback, edit ratings/tags, manage playlists — all from your phone
+- Browse the library (search + sort + tag filter), control playback, edit ratings/tags, manage playlists — all from your phone
+- **Karaoke lyrics** — the Now Playing screen shows synced lyrics with the current line highlighted; find, edit, or clear lyrics from the phone (the sync editor and whisper alignment run on the desktop)
 - **Stream to phone** — choose "This device" as the output to play the desktop's music on the phone (transcoded AAC, selectable quality) while the desktop stays silent
 - **Offline mode** — download tracks, folders or playlists to the phone (mirroring the desktop folder structure) and browse + play them with no connection to the desktop
 - **Apple Watch remote** — a control-only watchOS companion (play/pause, next/previous, volume) shipped alongside the iOS app
@@ -58,12 +71,16 @@ A companion Flutter app (`remote_app/`) controls the desktop over your local net
 
 ### File Operations
 - Copy/Move/Delete files and folders
+- **Drag & drop** — drag tracks (or a whole folder) onto any folder in the tree to move them; hold **Ctrl** to copy. Illegal drops (a folder into itself or its own subtree) are refused, and folder moves ask for confirmation
+- **New subfolder** — right-click a folder in the tree to create one
 - Recent folders menu (last 10 destinations for Copy and Move separately)
 - Confirmation dialog for delete operations
 - Automatically stops playback before moving/deleting playing files
+- Deleting the track you're listening to doesn't stop the music — playback continues with the next track in the queue (from the desktop or the phone)
 
 ### Quality of Life
 - Single-instance app — launching a second copy activates the existing window instead of starting a duplicate
+- Picks up where you left off — the folder you were browsing reopens on launch and the track you were playing is re-selected (and scrolled to), so Play resumes it
 - Recently-played history stays tidy: deleted folders (and their subfolders) are removed automatically, and a clear button (desktop and mobile) wipes the whole list
 
 ## Screenshots
@@ -120,7 +137,8 @@ The app displays AI-generated artist summaries using Claude Haiku 4.5 with web s
 
 ### Keyboard Shortcuts
 - **Double-click** on a track to play it
-- **Right-click** on folders or files for context menu (Copy/Move/Delete)
+- **Right-click** on folders or files for context menu (Copy/Move/Delete, New subfolder)
+- **Drag & drop** tracks or folders onto a folder in the tree to move them (hold **Ctrl** to copy)
 
 ## Building
 
@@ -154,6 +172,7 @@ MusicOrganiser/
 - [TagLibSharp](https://github.com/mono/taglib-sharp) - Audio metadata reading
 - [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite/) - Local SQLite cache for files and folders
 - [Anthropic.SDK](https://github.com/tghamm/Anthropic.SDK) - Claude AI integration for artist summaries
+- [Whisper.net](https://github.com/sandrohanea/whisper.net) - On-device speech recognition (whisper.cpp) for aligning lyrics to audio
 - [DotNetEnv](https://github.com/tonerdo/dotnet-env) - Environment variable loading from .env files
 
 ## License

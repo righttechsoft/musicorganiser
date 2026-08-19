@@ -73,6 +73,8 @@ class _HomeShellState extends State<HomeShell> {
                 children: [
                   ConnectionBanner(app: app),
                   Expanded(child: wide ? _tablet() : _phone()),
+                  if (app.offlinePlayer.current != null)
+                    OfflineMiniBar(player: app.offlinePlayer, store: app.offline),
                 ],
               ),
             ),
@@ -85,7 +87,7 @@ class _HomeShellState extends State<HomeShell> {
 
   // ---------- phone ----------
   Widget _phone() {
-    final showMini = app.status.nowPlaying != null && _tab != 0;
+    final showMini = app.status.nowPlaying != null && _tab != 0 && app.offlinePlayer.current == null;
     return Column(
       children: [
         Expanded(

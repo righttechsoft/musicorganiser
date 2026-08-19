@@ -41,6 +41,10 @@ class AppState extends ChangeNotifier {
   List<TrackFile> files = [];
   final Map<String, TrackFile> _byPath = {};
 
+  // Lyrics for the now-playing track only (re-fetched on track change).
+  LyricsData? lyrics;
+  bool loadingLyrics = false;
+
   // Local playback ("This device"): the phone streams + plays audio itself and follows
   // the desktop's /status. Session-only; bitrate is a persisted preference.
   final AudioPlayer _player = AudioPlayer();
@@ -185,6 +189,8 @@ class AppState extends ChangeNotifier {
     api = null;
     files = [];
     _byPath.clear();
+    lyrics = null;
+    loadingLyrics = false;
     unawaited(_player.stop());
     localOutput = false; // session-only: next connect defaults to desktop output
     _loadedPath = null;
@@ -324,7 +330,10 @@ class AppState extends ChangeNotifier {
       status = s;
       if (conn == ConnState.lost) conn = ConnState.connected;
       notifyListeners();
-      if (trackChanged) unawaited(loadFiles());
+      if (trackChanged) {
+        unawaited(loadFiles());
+        unawaited(_loadLyricsForTrack(s.nowPlaying));
+      }
       unawaited(_syncLocal(trackChanged: trackChanged));
     } catch (_) {
       if (conn == ConnState.connected) {
@@ -343,5 +352,90 @@ class AppState extends ChangeNotifier {
         ..addEntries(files.map((f) => MapEntry(f.path.toLowerCase(), f)));
       notifyListeners();
     } catch (_) {/* leave stale list; banner covers the error */}
+  }
+
+  // ---- Lyrics (now-playing track only) ----
+
+  /// Index of the current karaoke line at [status.positionSec], or -1 when there's
+  /// no synced lyrics. The phone's 1s poll is coarser than the desktop's 100ms
+  /// tick but fine for line-level highlighting.
+  int get activeLyricLineIndex {
+    final lines = lyrics?.lines ?? const <LyricLine>[];
+    if (lines.isEmpty) return -1;
+    final posMs = status.positionSec * 1000;
+    var idx = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].time.inMilliseconds <= posMs) {
+        idx = i;
+      } else {
+        break;
+      }
+    }
+    return idx;
+  }
+
+  // Called on track change: skip the network round trip when the desktop hasn't
+  // flagged cached lyrics for this track.
+  Future<void> _loadLyricsForTrack(NowPlaying? np) async {
+    if (np == null || !np.hasLyrics || api == null) {
+      lyrics = null;
+      notifyListeners();
+      return;
+    }
+    loadingLyrics = true;
+    notifyListeners();
+    try {
+      final data = await api!.lyrics(np.path);
+      if (status.nowPlaying?.path == np.path) lyrics = data.hasAny ? data : null;
+    } catch (_) {
+      if (status.nowPlaying?.path == np.path) lyrics = null;
+    } finally {
+      loadingLyrics = false;
+      notifyListeners();
+    }
+  }
+
+  /// Triggers the desktop's LRCLIB/AI lyrics fetch for [path], then polls the
+  /// cached result for up to ~10s — the AI web-search fallback can take a few
+  /// seconds, so a single GET right after the POST can race ahead of it.
+  Future<void> findLyrics(String path) async {
+    if (api == null) return;
+    loadingLyrics = true;
+    notifyListeners();
+    try {
+      await api!.findLyrics(path);
+    } catch (_) {/* best-effort; still poll below in case the fetch itself succeeded */}
+    for (var i = 0; i < 10; i++) {
+      try {
+        final data = await api!.lyrics(path);
+        if (data.hasAny) {
+          if (status.nowPlaying?.path == path) lyrics = data;
+          break;
+        }
+      } catch (_) {/* transient; retry */}
+      await Future.delayed(const Duration(seconds: 1));
+    }
+    loadingLyrics = false;
+    notifyListeners();
+  }
+
+  /// Saves manually-edited lyrics (source becomes "manual" on the desktop) and
+  /// refreshes the cache.
+  Future<void> saveLyrics(String path, {String? plain, String? lrc}) async {
+    if (api == null) return;
+    await api!.setLyrics(path, plain: plain, lrc: lrc);
+    try {
+      final data = await api!.lyrics(path);
+      if (status.nowPlaying?.path == path) lyrics = data.hasAny ? data : null;
+      notifyListeners();
+    } catch (_) {/* the write succeeded even if this refresh failed */}
+  }
+
+  /// Wipes a track's cached lyrics on the desktop so it can be re-fetched or pasted fresh.
+  Future<void> clearLyrics(String path) async {
+    if (api == null) return;
+    await api!.clearLyrics(path);
+    if (status.nowPlaying?.path == path) lyrics = null;
+    notifyListeners();
   }
 }

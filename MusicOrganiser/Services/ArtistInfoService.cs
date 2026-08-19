@@ -223,13 +223,58 @@ public class ArtistInfoService
         return null;
     }
 
-    private async Task<string> SendQueryWithWebSearchAsync(string prompt)
+    /// <summary>Identifies a band from its folder name + album subfolder names via web search
+    /// and suggests genre/style tags, preferring the given vocabulary's spellings. Returns
+    /// null when no API key is configured or on error; an empty list when the band couldn't
+    /// be reliably identified.</summary>
+    public async Task<IReadOnlyList<string>?> SuggestFolderTagsAsync(string bandName, IReadOnlyList<string> albums, IReadOnlyList<string> existingTags)
     {
-        var requestBody = new
+        if (_httpClient == null) return null;
+
+        try
         {
-            model = "claude-haiku-4-5",
-            max_tokens = 300,
-            system = @"You are a music expert assistant. Your task is to identify music artists and provide brief, accurate summaries.
+            var promptBuilder = new StringBuilder();
+            promptBuilder.AppendLine($"Band/artist folder name: {bandName}");
+            if (albums.Count > 0)
+            {
+                promptBuilder.AppendLine("Album folders found inside it:");
+                foreach (var album in albums.Take(20))
+                    promptBuilder.AppendLine($"- {album}");
+            }
+            promptBuilder.AppendLine();
+            promptBuilder.AppendLine($"Check Bandcamp specifically (\"{bandName}\" bandcamp) for this artist's own genre/style tags before falling back to general sources.");
+            if (existingTags.Count > 0)
+            {
+                promptBuilder.AppendLine();
+                promptBuilder.AppendLine("Existing tag vocabulary, reuse these exact spellings where they fit: " +
+                    string.Join(", ", existingTags));
+            }
+
+            var response = await SendQueryWithWebSearchAsync(promptBuilder.ToString(), FolderTagSystemPrompt, 300);
+            return ParseTagsResponse(response);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyList<string> ParseTagsResponse(string response)
+    {
+        var line = response
+            .Split('\n')
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => l.StartsWith("TAGS:", StringComparison.OrdinalIgnoreCase));
+        if (line == null) return Array.Empty<string>();
+
+        var value = line[5..];
+        return value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private const string ArtistSystemPrompt = @"You are a music expert assistant. Your task is to identify music artists and provide brief, accurate summaries.
 
 IMPORTANT: Always use the web_search tool to look up information about the artist. Search for:
 1. The artist name + song title together
@@ -237,7 +282,33 @@ IMPORTANT: Always use the web_search tool to look up information about the artis
 3. The artist name alone
 
 Use the search results to provide accurate, up-to-date information about the artist.
-Keep responses to 2-3 sentences. Include the artist's primary genre and one notable achievement or fact.",
+Keep responses to 2-3 sentences. Include the artist's primary genre and one notable achievement or fact.";
+
+    private const string FolderTagSystemPrompt = @"You are a music genre tagging assistant. Given a band/artist folder name and a list of their album folder names, identify the band via web search and suggest genre tags for their music.
+
+Search Bandcamp specifically (e.g. ""<band name>"" bandcamp, or site:bandcamp.com <band name>) in addition to general web search — Bandcamp artist and album pages carry curated genre/style tags written by the artist or label, which are usually more precise than generic genre labels. Prefer Bandcamp's own tags when you find them; fall back to general web search otherwise.
+
+Respond with ONLY a single line in this exact format:
+TAGS: tag1, tag2, tag3
+
+Provide 3-8 lowercase genre/style tags (genre, subgenre, and era only when clearly known — e.g. ""80s"", ""90s""). Do NOT include country, nationality, or location tags (no ""swedish"", ""german"", ""uk"", ""american"", etc.) — tags must describe musical genre/style only.
+
+Tags must be genre/style names, not standalone descriptive/mood adjectives. Never use a bare mood word as its own tag — NOT ""dark"", ""sad"", ""heavy"", ""melancholic"", ""aggressive"", ""atmospheric"", ""epic"", ""brutal"", ""raw"", or ""melodic"" by itself. This does NOT apply when the same word is part of an established genre name — that's a genre/style tag in its own right and is allowed, e.g. ""atmospheric black metal"", ""depressive black metal"", ""melodic death metal"", ""progressive rock"", ""post-rock"", and ""dark ambient"" (a real genre) are all fine. Only the bare adjective standing alone as its own tag is forbidden, not the same word inside a recognised genre name.
+
+If you cannot reliably identify the band, respond with:
+TAGS:
+and nothing else.";
+
+    private Task<string> SendQueryWithWebSearchAsync(string prompt) =>
+        SendQueryWithWebSearchAsync(prompt, ArtistSystemPrompt, 300);
+
+    private async Task<string> SendQueryWithWebSearchAsync(string prompt, string systemPrompt, int maxTokens)
+    {
+        var requestBody = new
+        {
+            model = "claude-haiku-4-5",
+            max_tokens = maxTokens,
+            system = systemPrompt,
             messages = new[]
             {
                 new { role = "user", content = prompt }

@@ -120,7 +120,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                       },
                     ),
             ),
-            _OfflineMiniBar(player: player, store: store),
+            if (widget.standalone) OfflineMiniBar(player: player, store: store),
           ],
         );
       },
@@ -446,10 +446,10 @@ class _QueuePanel extends StatelessWidget {
 }
 
 /// Bottom mini player for offline playback; tap for the full transport sheet.
-class _OfflineMiniBar extends StatelessWidget {
+class OfflineMiniBar extends StatelessWidget {
   final OfflinePlayer player;
   final OfflineStore store;
-  const _OfflineMiniBar({required this.player, required this.store});
+  const OfflineMiniBar({required this.player, required this.store});
 
   @override
   Widget build(BuildContext context) {

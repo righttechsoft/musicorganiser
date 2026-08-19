@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -38,6 +39,8 @@ public class ControlApiService : IDisposable
 
     // /status polls at 1Hz; only recompute the art count when the now-playing path changes.
     private (string? Path, int Count) _artCountCache;
+    // Same idea for the lyrics availability flags surfaced in /status.
+    private (string? Path, bool HasLyrics, bool Synced) _lyricsFlagCache;
 
     public ControlApiService(MainViewModel vm, int port = DefaultPort)
     {
@@ -203,8 +206,36 @@ public class ControlApiService : IDisposable
                 break;
             }
             case ("GET", "/files"):
-                await WriteJson(ctx, OnUi(BuildFiles));
+            {
+                var p = req.QueryString["path"];
+                if (string.IsNullOrWhiteSpace(p))
+                {
+                    await WriteJson(ctx, OnUi(BuildFiles));
+                    break;
+                }
+
+                var recursive = req.QueryString["recursive"] == "1";
+                var limit = int.TryParse(req.QueryString["limit"], out var lim) ? lim : (recursive ? 200 : int.MaxValue);
+
+                List<string> found;
+                try
+                {
+                    found = (recursive
+                        ? MusicMetadataService.EnumerateSupportedFilesRecursive(p)
+                        : MusicMetadataService.EnumerateSupportedFiles(p))
+                        .Take(limit)
+                        .ToList();
+                }
+                catch { found = new List<string>(); }
+
+                var basePath = p.TrimEnd('\\', '/');
+                await WriteJson(ctx, found.Select(f => (object)new
+                {
+                    path = f,
+                    relativePath = Path.GetRelativePath(basePath, f),
+                }).ToList());
                 break;
+            }
             case ("GET", "/search"):
             {
                 var q = req.QueryString["q"] ?? "";
@@ -277,6 +308,126 @@ public class ControlApiService : IDisposable
                         string.Equals(x.FullPath, p, StringComparison.OrdinalIgnoreCase));
                     if (f != null) f.Tags = tags;
                     else DatabaseService.Instance.SetFileTags(p, tags);
+                });
+                await WriteJson(ctx, new { success = true });
+                break;
+            }
+            case ("GET", "/folder/tags"):
+            {
+                var p = req.QueryString["path"];
+                if (string.IsNullOrWhiteSpace(p)) { await WriteError(ctx, "path required", 400); break; }
+                var tags = DatabaseService.Instance.GetFolderTags(p);
+                await WriteJson(ctx, new { tags = string.Join(", ", tags) });
+                break;
+            }
+            case ("POST", "/folder/tags"):
+            {
+                var body = await ReadBody(req);
+                var p = GetStr(body, "path");
+                var tags = GetStr(body, "tags");
+                if (p == null || tags == null) { await WriteError(ctx, "path and tags required", 400); break; }
+                DatabaseService.Instance.SetFolderTags(p, tags);
+                await WriteJson(ctx, new { success = true });
+                break;
+            }
+            case ("POST", "/folder/tags/suggest"):
+            {
+                var body = await ReadBody(req);
+                var p = GetStr(body, "path");
+                if (p == null) { await WriteError(ctx, "path required", 400); break; }
+
+                var bandName = Path.GetFileName(p.TrimEnd('\\', '/'));
+                List<string> albums;
+                try
+                {
+                    albums = Directory.GetDirectories(p)
+                        .Select(d => Path.GetFileName(d) ?? string.Empty)
+                        .Where(n => n.Length > 0)
+                        .ToList();
+                }
+                catch { albums = new List<string>(); }
+
+                var task = OnUi(() => _vm.SuggestFolderTagsAsync(bandName, albums));
+                var suggested = await task;
+                var current = DatabaseService.Instance.GetFolderTags(p);
+
+                if (suggested == null)
+                    await WriteJson(ctx, new { suggested = (string[]?)null, current = string.Join(", ", current), error = "AI unavailable" });
+                else
+                    await WriteJson(ctx, new { suggested, current = string.Join(", ", current) });
+                break;
+            }
+
+            // ---- Tag management (shared folder-tag vocabulary: delete / merge) ----
+            case ("GET", "/tags"):
+            {
+                var usage = DatabaseService.Instance.GetFolderTagUsage();
+                await WriteJson(ctx, usage.Select(u => (object)new { name = u.Name, folderCount = u.FolderCount }).ToList());
+                break;
+            }
+            case ("POST", "/tags/delete"):
+            {
+                var body = await ReadBody(req);
+                var tag = GetStr(body, "tag");
+                if (tag == null) { await WriteError(ctx, "tag required", 400); break; }
+                var affected = DatabaseService.Instance.DeleteFolderTag(tag);
+                await WriteJson(ctx, new { success = true, affected });
+                break;
+            }
+            case ("POST", "/tags/merge"):
+            {
+                var body = await ReadBody(req);
+                var from = GetStr(body, "from");
+                var to = GetStr(body, "to");
+                if (from == null || to == null) { await WriteError(ctx, "from and to required", 400); break; }
+                var affected = DatabaseService.Instance.MergeFolderTag(from, to);
+                await WriteJson(ctx, new { success = true, affected });
+                break;
+            }
+            case ("GET", "/file/lyrics"):
+            {
+                var p = req.QueryString["path"];
+                if (string.IsNullOrWhiteSpace(p)) { await WriteError(ctx, "path required", 400); break; }
+                var rec = await Task.Run(() => _vm.Lyrics.GetCached(p));
+                await WriteJson(ctx, new
+                {
+                    plain = rec?.Plain,
+                    lrc = rec?.Lrc,
+                    source = rec?.Source ?? "",
+                    synced = !string.IsNullOrWhiteSpace(rec?.Lrc),
+                });
+                break;
+            }
+            case ("POST", "/file/lyrics"):
+            {
+                var body = await ReadBody(req);
+                var p = GetStr(body, "path");
+                if (p == null) { await WriteError(ctx, "path required", 400); break; }
+                var plain = GetStr(body, "plain");
+                var lrc = GetStr(body, "lrc");
+                _vm.Lyrics.Save(p, plain, lrc, "manual");
+                await WriteJson(ctx, new { success = true });
+                break;
+            }
+            case ("POST", "/file/lyrics/find"):
+            {
+                var body = await ReadBody(req);
+                var p = GetStr(body, "path");
+                if (p == null) { await WriteError(ctx, "path required", 400); break; }
+                await WriteJson(ctx, await FindLyricsServerSideAsync(p));
+                break;
+            }
+            case ("POST", "/file/lyrics/clear"):
+            {
+                var body = await ReadBody(req);
+                var p = GetStr(body, "path");
+                if (p == null) { await WriteError(ctx, "path required", 400); break; }
+                OnUi(() =>
+                {
+                    _vm.Lyrics.Delete(p);
+                    var f = _vm.MusicFiles.FirstOrDefault(x =>
+                        string.Equals(x.FullPath, p, StringComparison.OrdinalIgnoreCase));
+                    if (f != null) f.HasLyrics = false;
                 });
                 await WriteJson(ctx, new { success = true });
                 break;
@@ -412,12 +563,17 @@ public class ControlApiService : IDisposable
                 await WriteJson(ctx, new { ok = true });
                 break;
 
-            // ---- Move / Delete (reuse FileOperationsService) ----
+            // ---- Copy / Move / Delete (reuse FileOperationsService) ----
+            case ("POST", "/file/copy"):
+                await FileOp(ctx, req, (src, dst) => _vm.FileOperations.CopyFileAsync(src, dst), needsDest: true);
+                break;
             case ("POST", "/file/move"):
                 await FileOp(ctx, req, (src, dst) => _vm.FileOperations.MoveFileAsync(src, dst), needsDest: true);
                 break;
             case ("POST", "/file/delete"):
-                await FileOp(ctx, req, (src, _) => _vm.FileOperations.DeleteFileAsync(src), needsDest: false);
+                // VM-level delete so the phone deleting the playing track advances the desktop
+                // to the next one instead of stopping the music.
+                await FileOp(ctx, req, (src, _) => _vm.DeleteFileAsync(src), needsDest: false);
                 break;
             case ("POST", "/folder/move"):
                 await FileOp(ctx, req, (src, dst) => _vm.FileOperations.MoveFolderAsync(src, dst), needsDest: true);
@@ -471,6 +627,8 @@ public class ControlApiService : IDisposable
                     album = np.Album,
                     durationSec = (int)_vm.TotalDuration.TotalSeconds,
                     artCount = GetArtCount(np.FullPath),
+                    hasLyrics = GetLyricsFlags(np.FullPath).HasLyrics,
+                    synced = GetLyricsFlags(np.FullPath).Synced,
                 },
                 positionSec = (int)_vm.CurrentPosition.TotalSeconds,
                 durationSec = (int)_vm.TotalDuration.TotalSeconds,
@@ -513,6 +671,52 @@ public class ControlApiService : IDisposable
 
         _artCountCache = (path, count);
         return count;
+    }
+
+    // Whether the now-playing track has any cached lyrics, and whether they're synced —
+    // cached per-path so the 1Hz /status poll only re-reads the DB when the track changes.
+    private (bool HasLyrics, bool Synced) GetLyricsFlags(string path)
+    {
+        if (_lyricsFlagCache.Path == path)
+            return (_lyricsFlagCache.HasLyrics, _lyricsFlagCache.Synced);
+
+        var rec = _vm.Lyrics.GetCached(path);
+        var hasLyrics = rec != null && (!string.IsNullOrWhiteSpace(rec.Plain) || !string.IsNullOrWhiteSpace(rec.Lrc));
+        var synced = rec != null && !string.IsNullOrWhiteSpace(rec.Lrc);
+        _lyricsFlagCache = (path, hasLyrics, synced);
+        return (hasLyrics, synced);
+    }
+
+    // Server-side lyrics search triggered by the phone: the free sources first
+    // (LRCLIB → LRCMux → SyncLRC), AI plain-text fallback. Mirrors
+    // MainViewModel.FetchLyricsFlowAsync but without the desktop's edit-review UI —
+    // the phone polls /file/lyrics afterwards for the saved result.
+    private async Task<object> FindLyricsServerSideAsync(string path)
+    {
+        var mf = OnUi(() => _vm.MusicFiles.FirstOrDefault(x =>
+            string.Equals(x.FullPath, path, StringComparison.OrdinalIgnoreCase)));
+        if (mf == null)
+        {
+            try { mf = await Task.Run(() => _vm.MetadataService.ReadMetadata(path)); } catch { }
+        }
+        if (mf == null) return new { success = false, error = "file not found" };
+
+        var online = await _vm.Lyrics.FetchOnlineAsync(mf.Artist, mf.Title, mf.Album, (int)mf.Duration.TotalSeconds);
+        if (online is { Instrumental: true })
+            return new { success = false, error = "Instrumental track — no lyrics." };
+
+        if (online != null && (!string.IsNullOrWhiteSpace(online.Lrc) || !string.IsNullOrWhiteSpace(online.Plain)))
+        {
+            _vm.Lyrics.Save(path, online.Plain, online.Lrc, online.Source);
+            return new { success = true, synced = !string.IsNullOrWhiteSpace(online.Lrc) };
+        }
+
+        var (text, confident, available) = await _vm.Lyrics.FetchAiPlainAsync(mf.Artist, mf.Title, mf.Album, mf.FileName);
+        if (!available)
+            return new { success = false, error = string.IsNullOrWhiteSpace(text) ? "No lyrics found online." : text };
+
+        _vm.Lyrics.Save(path, text, null, "ai");
+        return new { success = true, synced = false, confident };
     }
 
     // Must run inside OnUi — enumerates the VM's ObservableCollection.
@@ -600,13 +804,16 @@ public class ControlApiService : IDisposable
             try { _ = OnUiAsync(() => _vm.FolderTree.NavigateToPathAsync(path)); } catch { }
         }
 
-        var folders = Directory.GetDirectories(path)
+        var subdirs = Directory.GetDirectories(path).ToList();
+        var tagsByFolder = DatabaseService.Instance.GetFolderTagsBatch(subdirs);
+        var folders = subdirs
             .Select(d => (object)new
             {
                 name = Path.GetFileName(d),
                 path = d,
                 createdSec = UnixOrNull(() => Directory.GetCreationTimeUtc(d)),
                 modifiedSec = UnixOrNull(() => Directory.GetLastWriteTimeUtc(d)),
+                tags = tagsByFolder.TryGetValue(d, out var t) ? t : string.Empty,
             })
             .ToList();
 

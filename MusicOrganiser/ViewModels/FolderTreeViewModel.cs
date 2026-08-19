@@ -4,12 +4,66 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using MusicOrganiser.Models;
 using MusicOrganiser.Services;
 
 namespace MusicOrganiser.ViewModels;
+
+/// <summary>DB-driven tag-filter match set: every folder path tagged with ANY of the
+/// selected tags, plus every ancestor of those paths (so matches stay reachable from a
+/// visible root). Built once per filter change and shared by reference down the tree —
+/// see <see cref="FolderNode.MatchSet"/>.</summary>
+public sealed class TagMatchSet
+{
+    public HashSet<string> Matches { get; }
+    public HashSet<string> Ancestors { get; }
+
+    public TagMatchSet(IEnumerable<string> matchPaths)
+    {
+        var paths = matchPaths as IReadOnlyCollection<string> ?? matchPaths.ToList();
+        Matches = new HashSet<string>(paths.Select(Normalize), StringComparer.OrdinalIgnoreCase);
+        Ancestors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in paths)
+            foreach (var a in BuildAncestors(m))
+                Ancestors.Add(a);
+    }
+
+    public static string Normalize(string path) => (path ?? string.Empty).TrimEnd('\\', '/');
+
+    // Every ancestor directory of path, from its immediate parent up to the drive root.
+    private static IEnumerable<string> BuildAncestors(string path)
+    {
+        var result = new List<string>();
+        string? current;
+        try { current = Path.GetDirectoryName(path); }
+        catch { current = null; }
+
+        while (!string.IsNullOrEmpty(current))
+        {
+            result.Add(Normalize(current));
+            string? next;
+            try { next = Path.GetDirectoryName(current); }
+            catch { next = null; }
+            if (string.Equals(next, current, StringComparison.OrdinalIgnoreCase)) break;
+            current = next;
+        }
+        return result;
+    }
+
+#if DEBUG
+    static TagMatchSet()
+    {
+        var ancestors = new HashSet<string>(BuildAncestors(@"N:\Music\!UNSORTED\Band"), StringComparer.OrdinalIgnoreCase);
+        System.Diagnostics.Debug.Assert(ancestors.Contains(Normalize(@"N:\Music\!UNSORTED")));
+        System.Diagnostics.Debug.Assert(ancestors.Contains(Normalize(@"N:\Music")));
+        System.Diagnostics.Debug.Assert(ancestors.Contains(Normalize(@"N:\")));
+        System.Diagnostics.Debug.Assert(!ancestors.Contains(Normalize(@"N:\Music\!UNSORTED\Band")));
+    }
+#endif
+}
 
 public enum FolderSortOption
 {
@@ -46,6 +100,7 @@ public class FolderNode : ViewModelBase
     private Task? _refreshTask;
     private readonly bool _isDummy;
     private string _filterText = string.Empty;
+    private TagMatchSet? _matchSet;
     private FolderSortOption _sortOption = FolderSortOption.NameAsc;
     private bool _isDeleted;
 
@@ -128,6 +183,28 @@ public class FolderNode : ViewModelBase
         }
     }
 
+    // DB-driven tag-filter match set (ANY selected tag matches), propagated down the tree the
+    // same way FilterText is. Null = filter off. See TagMatchSet — the tag data comes from the
+    // DB (FolderTreeViewModel.SelectedTags), not from walking loaded nodes: a tagged folder can
+    // be several levels below anything currently expanded/loaded.
+    public TagMatchSet? MatchSet
+    {
+        get => _matchSet;
+        set
+        {
+            if (!ReferenceEquals(_matchSet, value))
+            {
+                _matchSet = value;
+                foreach (var child in Children)
+                {
+                    child.MatchSet = value;
+                }
+                OnPropertyChanged(nameof(MatchSet));
+                OnPropertyChanged(nameof(IsVisible));
+            }
+        }
+    }
+
     public FolderSortOption SortOption
     {
         get => _sortOption;
@@ -155,14 +232,22 @@ public class FolderNode : ViewModelBase
     {
         get
         {
-            if (_isDummy) return string.IsNullOrWhiteSpace(_filterText);
-            if (string.IsNullOrWhiteSpace(_filterText)) return true;
+            var tagActive = _matchSet != null && _matchSet.Matches.Count > 0;
 
-            if (Name.Contains(_filterText, StringComparison.OrdinalIgnoreCase))
-                return true;
+            if (_isDummy) return string.IsNullOrWhiteSpace(_filterText) && !tagActive;
 
-            // If a parent folder matched the filter, show its whole subtree unfiltered.
-            if (AncestorMatches())
+            var nameMatches = string.IsNullOrWhiteSpace(_filterText)
+                || Name.Contains(_filterText, StringComparison.OrdinalIgnoreCase)
+                // If a parent folder matched the name filter, show its whole subtree unfiltered.
+                || AncestorMatches();
+
+            if (!tagActive)
+                return nameMatches || Children.Any(c => c.IsVisible);
+
+            var norm = TagMatchSet.Normalize(FullPath);
+            var tagMatches = _matchSet!.Matches.Contains(norm) || _matchSet.Ancestors.Contains(norm);
+
+            if (nameMatches && tagMatches)
                 return true;
 
             return Children.Any(c => c.IsVisible);
@@ -193,14 +278,20 @@ public class FolderNode : ViewModelBase
         }
     }
 
+    // True when selecting this node is what unfolded it (it was collapsed at selection time).
+    // Band-folder auto-descend only fires on that unfold, not on re-selecting an open folder.
+    public bool UnfoldedBySelection { get; private set; }
+
     public bool IsSelected
     {
         get => _isSelected;
         set
         {
-            if (SetProperty(ref _isSelected, value) && value && Children.Count > 0)
+            if (SetProperty(ref _isSelected, value) && value)
             {
-                IsExpanded = true;
+                UnfoldedBySelection = !_isExpanded;
+                if (Children.Count > 0)
+                    IsExpanded = true;
             }
         }
     }
@@ -296,6 +387,7 @@ public class FolderNode : ViewModelBase
         {
             Parent = this,
             FilterText = _filterText,
+            MatchSet = _matchSet,
             SortOption = _sortOption
         };
         if (record != null)
@@ -468,6 +560,8 @@ public class FolderNode : ViewModelBase
 public class FolderTreeViewModel : ViewModelBase
 {
     private string _filterText = string.Empty;
+    private IReadOnlyList<string> _selectedTags = Array.Empty<string>();
+    private CancellationTokenSource? _tagFilterCts;
     private FolderSortOptionItem _selectedSortOption;
 
     public ObservableCollection<FolderNode> RootNodes { get; } = new();
@@ -542,6 +636,100 @@ public class FolderTreeViewModel : ViewModelBase
                 OnPropertyChanged(nameof(FilterText));
             }
         }
+    }
+
+    // Selected tag filter (ANY selected tag matches). The match set has to come from the DB —
+    // see TagMatchSet — since a tagged folder can be anywhere in the library, not just under an
+    // already-loaded tree node.
+    public IReadOnlyList<string> SelectedTags
+    {
+        get => _selectedTags;
+        set
+        {
+            value ??= Array.Empty<string>();
+            if (!_selectedTags.SequenceEqual(value, StringComparer.OrdinalIgnoreCase))
+            {
+                _selectedTags = value;
+                OnPropertyChanged(nameof(SelectedTags));
+                _ = ApplyTagFilterAsync(value);
+            }
+        }
+    }
+
+    private async Task ApplyTagFilterAsync(IReadOnlyList<string> tags)
+    {
+        _tagFilterCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _tagFilterCts = cts;
+        var token = cts.Token;
+
+        IsBusy = true;
+        try
+        {
+            if (tags.Count == 0)
+            {
+                foreach (var node in RootNodes) node.MatchSet = null;
+                return;
+            }
+
+            IReadOnlyList<string> paths;
+            try { paths = await Task.Run(() => DatabaseService.Instance.SearchFolderPathsByTags(tags), token); }
+            catch (OperationCanceledException) { return; }
+            if (token.IsCancellationRequested) return;
+
+            var matchSet = new TagMatchSet(paths);
+            foreach (var node in RootNodes) node.MatchSet = matchSet;
+
+            // ponytail: cap tree materialization (expand + load every ancestor level) at 200
+            // matches — the DB query itself can return up to its own (higher) limit, but
+            // actually expanding that many ancestor chains is real disk/DB work per match.
+            // Raise this only if a real library has more than 200 folders under one filter.
+            foreach (var path in paths.Take(200))
+            {
+                if (token.IsCancellationRequested) return;
+                await EnsurePathMaterializedAsync(path);
+            }
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested) IsBusy = false;
+        }
+    }
+
+    /// <summary>Batch-refreshes every already-loaded node's Tags from the DB via
+    /// <see cref="FolderNode.ApplyCache"/> (no write-back — the values just came from the DB)
+    /// and force-reruns the current tag filter (if any) against the DB. Used after the tag
+    /// manager deletes or merges a tag: loaded nodes' Tags strings go stale, and even an
+    /// unchanged selection can gain matches (a merge can move folders onto an already-selected
+    /// tag), so the filter is re-run unconditionally rather than relying on SelectedTags'
+    /// change-detection.</summary>
+    public async Task RefreshAllFolderTagsAsync()
+    {
+        var nodes = new List<FolderNode>();
+        foreach (var root in RootNodes) CollectLoadedNodes(root, nodes);
+
+        if (nodes.Count > 0)
+        {
+            var paths = nodes.Select(n => n.FullPath).ToList();
+            var tagsByPath = await Task.Run(() => DatabaseService.Instance.GetFolderTagsBatch(paths));
+            foreach (var node in nodes)
+            {
+                var tags = tagsByPath.TryGetValue(node.FullPath, out var t) ? t : string.Empty;
+                node.ApplyCache(node.Rating, tags);
+            }
+        }
+
+        if (_selectedTags.Count > 0)
+            await ApplyTagFilterAsync(_selectedTags);
+    }
+
+    // Dummy (unloaded "Loading...") placeholders have an empty FullPath — skip them rather
+    // than reading FolderNode's private _isDummy flag from this sibling class.
+    private static void CollectLoadedNodes(FolderNode node, List<FolderNode> into)
+    {
+        if (string.IsNullOrEmpty(node.FullPath)) return;
+        into.Add(node);
+        foreach (var child in node.Children) CollectLoadedNodes(child, into);
     }
 
     public FolderTreeViewModel()
@@ -625,11 +813,24 @@ public class FolderTreeViewModel : ViewModelBase
 
     private async Task<bool> NavigateToPathCoreAsync(string path)
     {
-        if (string.IsNullOrWhiteSpace(path)) return false;
+        var node = await EnsurePathMaterializedAsync(path);
+        if (node == null) return false;
+
+        node.IsSelected = true;
+        return true;
+    }
+
+    /// <summary>Expands + loads every ancestor level of <paramref name="path"/> so its
+    /// FolderNode actually exists in the tree, without selecting it or triggering the
+    /// band-folder auto-descend. Shared by navigation (which selects the result afterwards)
+    /// and the tag filter (which only needs matches to exist/be visible).</summary>
+    private async Task<FolderNode?> EnsurePathMaterializedAsync(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
 
         var root = RootNodes.FirstOrDefault(r =>
             path.StartsWith(r.FullPath, StringComparison.OrdinalIgnoreCase));
-        if (root == null) return false;
+        if (root == null) return null;
 
         var current = root;
         current.IsExpanded = true;
@@ -641,10 +842,7 @@ public class FolderTreeViewModel : ViewModelBase
             : string.Empty;
 
         if (string.IsNullOrEmpty(rest))
-        {
-            current.IsSelected = true;
-            return true;
-        }
+            return current;
 
         var parts = rest.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
         var accumPath = rootPath;
@@ -662,7 +860,7 @@ public class FolderTreeViewModel : ViewModelBase
                 await current.EnsureRefreshedAsync();
                 child = current.Children.FirstOrDefault(c =>
                     string.Equals(c.FullPath.TrimEnd('\\', '/'), accumPath.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
-                if (child == null) return false;
+                if (child == null) return null;
             }
 
             current = child;
@@ -673,8 +871,7 @@ public class FolderTreeViewModel : ViewModelBase
             }
         }
 
-        current.IsSelected = true;
-        return true;
+        return current;
     }
 
     public FolderNode? FindNode(string path)

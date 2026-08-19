@@ -62,6 +62,22 @@ public class MusicMetadataService
         }
     }
 
+    /// <summary>Enumerates supported music file paths under a folder, recursively (subfolders
+    /// included too), no tag reading. Shares <see cref="SupportedExtensions"/> with the
+    /// top-level enumerator above. Used by the bulk-tag band preview player and the desktop's
+    /// recursive /files API for the mobile remote.</summary>
+    public static IEnumerable<string> EnumerateSupportedFilesRecursive(string folderPath)
+    {
+        if (!Directory.Exists(folderPath))
+            yield break;
+
+        foreach (var ext in SupportedExtensions)
+        {
+            foreach (var file in Directory.EnumerateFiles(folderPath, $"*{ext}", SearchOption.AllDirectories))
+                yield return file;
+        }
+    }
+
     /// <summary>
     /// Finds album art candidates for a folder. Priority: the current track's own embedded
     /// pictures, then image files in the folder, then embedded picture in a music file,

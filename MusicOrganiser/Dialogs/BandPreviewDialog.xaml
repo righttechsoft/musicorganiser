@@ -1,0 +1,42 @@
+<Window x:Class="MusicOrganiser.Dialogs.BandPreviewDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Preview"
+        Height="480" Width="520"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="CountText" Grid.Row="0" Foreground="Gray" Margin="0,0,0,10"/>
+
+        <ListBox x:Name="FilesList" Grid.Row="1"
+                 MouseDoubleClick="FilesList_MouseDoubleClick"/>
+
+        <TextBlock x:Name="StatusText" Grid.Row="2" Foreground="Red" Margin="0,8,0,0" TextWrapping="Wrap"/>
+
+        <Slider x:Name="PositionSlider" Grid.Row="3" Margin="0,10,0,0"
+                Minimum="0" IsMoveToPointEnabled="True"
+                PreviewMouseDown="PositionSlider_PreviewMouseDown"
+                PreviewMouseUp="PositionSlider_PreviewMouseUp"/>
+
+        <Grid Grid.Row="4" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="PlayPauseButton" Grid.Column="0" Content="▶" Width="40" Click="PlayPause_Click"/>
+            <Button Grid.Column="1" Content="Play selected" Width="100" Margin="8,0,0,0" Click="PlaySelected_Click"/>
+            <TextBlock x:Name="TimeText" Grid.Column="3" VerticalAlignment="Center" Text="0:00 / 0:00"/>
+        </Grid>
+    </Grid>
+</Window>

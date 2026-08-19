@@ -14,8 +14,11 @@ public class AudioPlayerService : IDisposable
     private NotificationClient? _notificationClient;
     private WasapiOut? _output;
     private MediaFoundationResampler? _resampler;
+    // Target format of _resampler, kept so Seek can rebuild it with identical output.
+    private WaveFormat? _resamplerFormat;
+    private LockedSampleProvider? _lockedProvider;
     // In-app gain applied at the TAIL of the pipeline (after the resampler) so volume/mute
-    // changes are audible within WasapiOut's buffer (~100ms) instead of after the resampler's
+    // changes are audible within WasapiOut's buffer (the configured OutputBufferMs) instead of after the resampler's
     // ~1s source buffer. Do not move this back onto AudioFileReader.
     private VolumeSampleProvider? _gain;
     private AudioFileReader? _audioFile;
@@ -26,6 +29,7 @@ public class AudioPlayerService : IDisposable
     private readonly System.Timers.Timer _positionTimer;
     private bool _disposed;
     private float _volume = 1.0f;
+    private int _outputBufferMs = 300;
     private bool _localMuted;
     // Bluetooth A2DP endpoints often fail (throw at Init, or error mid-stream via PlaybackStopped)
     // in WASAPI shared *event-sync* mode; push mode is reliable. Sticky once tripped for the session.
@@ -37,6 +41,11 @@ public class AudioPlayerService : IDisposable
     private AudioEndpointVolume? _monitoredEndpointVolume;
     // Serializes device-change handling — a single Bluetooth connect fires several callbacks.
     private readonly object _deviceChangeLock = new();
+    // Serializes pipeline reads against Seek's resampler swap. Flushing via the MFT's
+    // Reposition() is NOT an option: its EndStreamAndDrain/ProcessOutput loop crashes
+    // natively (0xc0000005) even single-threaded, so Seek replaces the resampler outright
+    // and reads must not run mid-swap.
+    private readonly object _pipelineLock = new();
 
     public event EventHandler<TimeSpan>? PositionChanged;
     public event EventHandler? PlaybackStopped;
@@ -136,6 +145,28 @@ public class AudioPlayerService : IDisposable
             UpdateVolumeMonitor(); // watch the newly-selected endpoint's master volume
 
             // Live-switch the current track to the new device, preserving position/state.
+            if (CurrentFilePath != null)
+            {
+                var path = CurrentFilePath;
+                var pos = CurrentPosition;
+                var wasPaused = IsPaused;
+                Play(path);
+                Seek(pos);
+                if (wasPaused) Pause();
+            }
+        }
+    }
+
+    // WASAPI buffer duration in ms, clamped 100–1000. Changing it live re-inits the
+    // current track (same pattern as OutputDeviceId), preserving position/pause state.
+    public int OutputBufferMs
+    {
+        get => _outputBufferMs;
+        set
+        {
+            var clamped = Math.Clamp(value, 100, 1000);
+            if (clamped == _outputBufferMs) return;
+            _outputBufferMs = clamped;
             if (CurrentFilePath != null)
             {
                 var path = CurrentFilePath;
@@ -294,16 +325,19 @@ public class AudioPlayerService : IDisposable
             // >2 channels — the stripped AsStandardWaveFormat() form fails with E_INVALIDARG
             // ("Value does not fall within the expected range").
             var mixFormat = device.AudioClient.MixFormat;
-            _resampler = new MediaFoundationResampler(
-                _audioFile, WaveFormat.CreateIeeeFloatWaveFormat(mixFormat.SampleRate, 2));
-            _gain = new VolumeSampleProvider(_resampler.ToSampleProvider())
+            _resamplerFormat = WaveFormat.CreateIeeeFloatWaveFormat(mixFormat.SampleRate, 2);
+            _resampler = new MediaFoundationResampler(_audioFile, _resamplerFormat);
+            _lockedProvider = new LockedSampleProvider(_resampler.ToSampleProvider(), _pipelineLock);
+            _gain = new VolumeSampleProvider(_lockedProvider)
             {
                 Volume = _localMuted ? 0f : _volume
             };
             IWaveProvider outProvider = mixFormat.Channels > 2
                 ? new StereoToSurround(_gain, mixFormat)
                 : new SampleToWaveProvider(_gain);
-            _output = new WasapiOut(device, AudioClientShareMode.Shared, !_pushModeFallback, 100);
+            // Bigger buffer survives render-thread starvation at high CPU load (100ms glitched);
+            // cost: tail-stage changes (in-app volume, audible seek) lag by ~buffer size.
+            _output = new WasapiOut(device, AudioClientShareMode.Shared, !_pushModeFallback, _outputBufferMs);
             _output.Init(outProvider);
             _output.PlaybackStopped += OnPlaybackStopped;
             _output.Play();
@@ -357,7 +391,20 @@ public class AudioPlayerService : IDisposable
     {
         if (_audioFile != null)
         {
-            _audioFile.CurrentTime = position;
+            // Discard the resampler's ~1s of buffered pre-seek audio by swapping in a fresh
+            // resampler over the repositioned reader (Reposition() would drain-crash, see
+            // _pipelineLock). The lock keeps the render thread's Read out during the swap.
+            lock (_pipelineLock)
+            {
+                _audioFile.CurrentTime = position;
+                if (_resampler != null && _lockedProvider != null && _resamplerFormat != null)
+                {
+                    var old = _resampler;
+                    _resampler = new MediaFoundationResampler(_audioFile, _resamplerFormat);
+                    _lockedProvider.SetSource(_resampler.ToSampleProvider());
+                    old.Dispose();
+                }
+            }
             PositionChanged?.Invoke(this, position);
         }
     }
@@ -380,6 +427,8 @@ public class AudioPlayerService : IDisposable
             _resampler = null;
         }
         _gain = null;
+        _lockedProvider = null;
+        _resamplerFormat = null;
 
         if (_audioFile != null)
         {
@@ -406,12 +455,22 @@ public class AudioPlayerService : IDisposable
     {
         _positionTimer.Stop();
 
+        // ponytail: WasapiOut can intermittently fire a non-null Exception on a NATURAL end (seen
+        // on the Realtek endpoint), not just a genuine mid-stream drop. Without this guard that
+        // re-inits playback and seeks to CurrentPosition — which at a natural end is the very end
+        // of the track — landing on zero remaining samples with no further PlaybackStopped, so the
+        // track sits "playing" forever with no auto-advance. 2s is enough slack for the position
+        // timer's last tick to lag the real end without also matching a real mid-stream error
+        // (those happen well before the end).
+        var nearEnd = TotalDuration > TimeSpan.Zero
+                      && CurrentPosition >= TotalDuration - TimeSpan.FromSeconds(2);
+
         // Device errored mid-stream (common on Bluetooth event-sync) rather than the track
         // ending cleanly. Retry the same track/position in push mode before giving up, so the
         // ViewModel doesn't mistake it for end-of-track and skip through the whole queue.
         // Deferred off this callback thread: re-initing WASAPI here would dispose _output from
         // inside its own PlaybackStopped callback and deadlock (see device-change handling).
-        if (e.Exception != null && !_pushModeFallback && CurrentFilePath != null)
+        if (e.Exception != null && !_pushModeFallback && CurrentFilePath != null && !nearEnd)
         {
             _pushModeFallback = true;
             var path = CurrentFilePath;
@@ -448,6 +507,22 @@ public class AudioPlayerService : IDisposable
         _monitoredDevice?.Dispose();
         _selectedDevice?.Dispose();
         _enum.Dispose();
+    }
+
+    // Takes _pipelineLock around every Read so Seek can safely swap the resampler
+    // (see _pipelineLock comment). Sits between the resampler and the volume stage.
+    private sealed class LockedSampleProvider : ISampleProvider
+    {
+        private ISampleProvider _src;
+        private readonly object _lock;
+        public LockedSampleProvider(ISampleProvider src, object sync) { _src = src; _lock = sync; }
+        public WaveFormat WaveFormat => _src.WaveFormat;
+        // Call only while holding the lock (Seek does) so Read never sees a half-swapped source.
+        public void SetSource(ISampleProvider src) => _src = src;
+        public int Read(float[] buffer, int offset, int count)
+        {
+            lock (_lock) return _src.Read(buffer, offset, count);
+        }
     }
 
     // Duplicates a stereo source across all channels of a multichannel endpoint so stereo music

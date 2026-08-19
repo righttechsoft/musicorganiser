@@ -1,4 +1,4 @@
-<Window x:Class="MusicOrganiser.MainWindow"
+﻿<Window x:Class="MusicOrganiser.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -113,6 +113,8 @@
             <TreeView x:Name="FolderTreeView" Grid.Row="0"
                       ItemsSource="{Binding FolderTree.RootNodes}"
                       SelectedItemChanged="FolderTreeView_SelectedItemChanged"
+                      PreviewMouseLeftButtonDown="DragSource_PreviewMouseLeftButtonDown"
+                      MouseMove="FolderTreeView_MouseMove"
                       ScrollViewer.HorizontalScrollBarVisibility="Hidden"
                       VirtualizingStackPanel.IsVirtualizing="True"
                       VirtualizingStackPanel.VirtualizationMode="Recycling">
@@ -151,6 +153,10 @@
                         <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}"/>
                         <Setter Property="Visibility" Value="{Binding IsVisible, Converter={StaticResource BoolToVis}}"/>
                         <EventSetter Event="MouseRightButtonDown" Handler="TreeViewItem_MouseRightButtonDown"/>
+                        <!-- Drop target for dragged grid files / other folders (see MainWindow.xaml.cs). -->
+                        <Setter Property="AllowDrop" Value="True"/>
+                        <EventSetter Event="DragOver" Handler="FolderItem_DragOver"/>
+                        <EventSetter Event="Drop" Handler="FolderItem_Drop"/>
                         <!-- Retemplated to shrink the per-level indent (expander column 12px vs the
                              ~19px default), so deep folder chains don't march off to the right. -->
                         <Setter Property="Template">
@@ -265,7 +271,10 @@
                     <ContextMenu x:Name="FolderContextMenu" Opened="FolderContextMenu_Opened">
                         <MenuItem Header="Play folder" Click="FolderPlay_Click"/>
                         <Separator/>
+                        <MenuItem Header="New subfolder" Click="FolderNewSubfolder_Click"/>
                         <MenuItem Header="Refresh" Click="FolderRefresh_Click"/>
+                        <MenuItem Header="Tag..." Click="FolderTag_Click"/>
+                        <MenuItem Header="Bulk tag subfolders..." Click="BulkTag_Click"/>
                         <Separator/>
                         <MenuItem x:Name="FolderCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FolderMoveToMenu" Header="Move To"/>
@@ -283,35 +292,77 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <Grid Grid.Row="0" Margin="0,0,0,5">
-                        <TextBox x:Name="FilterBox"
-                                 Text="{Binding FolderTree.FilterText, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="Filter folders"
-                                 Padding="0,0,20,0"/>
-                        <!-- One-click clear; hidden while the filter is empty -->
-                        <Button Content="&#x2715;" Click="ClearFilter_Click"
-                                HorizontalAlignment="Right" VerticalAlignment="Center"
-                                Width="18" Height="18" Margin="0,0,3,0" Padding="0"
-                                Background="Transparent" BorderThickness="0"
-                                Foreground="#888888" FontSize="11" Cursor="Hand"
-                                ToolTip="Clear filter">
-                            <Button.Style>
-                                <Style TargetType="Button">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding FolderTree.FilterText}" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Button.Style>
-                        </Button>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0" Content="^" Width="22" Height="22" Margin="0,0,4,0"
+                                Padding="0" FontWeight="Bold" VerticalAlignment="Center"
+                                ToolTip="Up a level" Click="UpLevel_Click"/>
+                        <Grid Grid.Column="1">
+                            <TextBox x:Name="FilterBox"
+                                     Text="{Binding FolderTree.FilterText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="Filter folders"
+                                     Padding="0,0,20,0"/>
+                            <!-- One-click clear; hidden while the filter is empty -->
+                            <Button Content="&#x2715;" Click="ClearFilter_Click"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                                    Width="18" Height="18" Margin="0,0,3,0" Padding="0"
+                                    Background="Transparent" BorderThickness="0"
+                                    Foreground="#888888" FontSize="11" Cursor="Hand"
+                                    ToolTip="Clear filter">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding FolderTree.FilterText}" Value="">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                        </Grid>
                     </Grid>
-                    <ComboBox Grid.Row="1"
+                    <ComboBox Grid.Row="1" Margin="0,0,0,5"
                               ItemsSource="{Binding FolderTree.SortOptions}"
                               SelectedItem="{Binding FolderTree.SelectedSortOption}"
                               ToolTip="Sort folders by"/>
+                    <Grid Grid.Row="2">
+                        <ToggleButton x:Name="TagsFilterToggle" Content="Tags"
+                                      HorizontalAlignment="Left" Padding="6,3"
+                                      ToolTip="Filter folders by tag"/>
+                        <Popup x:Name="TagsFilterPopup" PlacementTarget="{Binding ElementName=TagsFilterToggle}"
+                               Placement="Bottom" StaysOpen="False"
+                               IsOpen="{Binding IsChecked, ElementName=TagsFilterToggle, Mode=TwoWay}"
+                               Opened="TagsFilterPopup_Opened">
+                            <Border Background="White" BorderBrush="#AAAAAA" BorderThickness="1" Padding="6"
+                                    MinWidth="150" MaxHeight="240">
+                                <StackPanel>
+                                    <ScrollViewer MaxHeight="200" VerticalScrollBarVisibility="Auto">
+                                        <ItemsControl x:Name="TagsFilterItemsControl">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <CheckBox Content="{Binding Name}"
+                                                              IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                                              Margin="2" Click="TagFilterCheckBox_Click"/>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                    <Separator Margin="0,4"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Content="Clear" Click="TagsFilterClear_Click" Padding="6,2"/>
+                                        <Button Content="Manage tags..." Click="ManageTags_Click"
+                                                Margin="8,0,0,0" Padding="6,2"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Popup>
+                    </Grid>
                 </Grid>
             </Border>
         </Grid>
@@ -373,6 +424,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="4*"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
@@ -477,6 +529,9 @@
                       CanUserDeleteRows="False"
                       GridLinesVisibility="None"
                       AlternationCount="2"
+                      RowHeight="22"
+                      PreviewMouseLeftButtonDown="DragSource_PreviewMouseLeftButtonDown"
+                      MouseMove="MusicFilesGrid_MouseMove"
                       MouseDoubleClick="MusicFilesGrid_MouseDoubleClick">
                 <DataGrid.RowStyle>
                     <Style TargetType="DataGridRow">
@@ -492,6 +547,10 @@
                             <Trigger Property="AlternationIndex" Value="1">
                                 <Setter Property="Background" Value="#BEF0F0F0"/>
                             </Trigger>
+                            <!-- Kept alongside the CellStyle trigger below (belt-and-suspenders) —
+                                 DataGridRow.Background sits behind the cells and doesn't reliably
+                                 paint over them, which is what the CellStyle trigger is for; this one
+                                 still drives the left accent bar via the row's own border. -->
                             <DataTrigger Value="True">
                                 <DataTrigger.Binding>
                                     <MultiBinding Converter="{StaticResource NowPlayingBoolConverter}">
@@ -499,12 +558,60 @@
                                         <Binding Path="DataContext.NowPlaying" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
                                     </MultiBinding>
                                 </DataTrigger.Binding>
-                                <Setter Property="Background" Value="#C8E6FF"/>
+                                <Setter Property="Background" Value="#90CAF9"/>
                                 <Setter Property="FontWeight" Value="SemiBold"/>
+                                <Setter Property="BorderBrush" Value="#1565C0"/>
+                                <Setter Property="BorderThickness" Value="3,0,0,0"/>
                             </DataTrigger>
                         </Style.Triggers>
                     </Style>
                 </DataGrid.RowStyle>
+                <!-- Paints the now-playing highlight ON the cells too (not just the row, which
+                     sits behind DataGridCellsPresenter and doesn't reliably render its Background
+                     over them) — this is what actually makes the highlight visible against the
+                     transparent grid/album-cover background. Transparent otherwise so non-playing
+                     rows still show the album art through the grid. -->
+                <DataGrid.CellStyle>
+                    <Style TargetType="DataGridCell">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <!-- Foreground/BorderBrush must be set here, not left to the theme. This style
+                             REPLACES the theme's DataGridCell style setters but the theme's *triggers*
+                             still apply to any property this style leaves alone (explicit-style setters
+                             outrank theme-style triggers, theme triggers outrank nothing at all). The
+                             theme's IsSelected trigger paints Foreground white + BorderBrush highlight-blue,
+                             on the assumption its Background trigger painted the cell blue too — but the
+                             Transparent setter above suppresses exactly that. Result was white text on a
+                             white row inside blue cell outlines: the selected row looked like a strip of
+                             empty boxes, with a black outline on the focused cell (the theme's
+                             IsKeyboardFocusWithin trigger). -->
+                        <Setter Property="Foreground" Value="Black"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
+                        <!-- Three row states, painted here on the CELLS (the row's own Background sits
+                             behind them). Trigger order IS the priority — later wins:
+                               hover  #EBF4FE  faint wash, follows the mouse
+                               select #CCE8FF  Explorer blue, independent of focus so it never dims
+                               play   #90CAF9  + SemiBold + left accent bar, outranks the other two so
+                                               the "what's playing" marker never flickers under the mouse -->
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                <Setter Property="Background" Value="#EBF4FE"/>
+                            </DataTrigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#CCE8FF"/>
+                                <Setter Property="Foreground" Value="Black"/>
+                            </Trigger>
+                            <DataTrigger Value="True">
+                                <DataTrigger.Binding>
+                                    <MultiBinding Converter="{StaticResource NowPlayingBoolConverter}">
+                                        <Binding />
+                                        <Binding Path="DataContext.NowPlaying" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                                    </MultiBinding>
+                                </DataTrigger.Binding>
+                                <Setter Property="Background" Value="#90CAF9"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.CellStyle>
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="File Name" Binding="{Binding FileName}" Width="*" MinWidth="150"/>
                     <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="*" MinWidth="100"/>
@@ -514,6 +621,21 @@
                     <DataGridTextColumn Header="Bitrate" Binding="{Binding BitrateFormatted}" Width="80"/>
                     <DataGridTextColumn Header="Genre" Binding="{Binding Genre}" Width="80"/>
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="50"/>
+                    <DataGridTemplateColumn Header="" Width="24" CanUserSort="False">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="&#x1F3A4;" FontSize="11" Foreground="#AAAAAA"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           ToolTip="Has lyrics"
+                                           Visibility="{Binding HasLyrics, Converter={StaticResource BoolToVis}}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <!-- The next two columns reveal editors on row hover, and both are TALLER than
+                         what they replace: an unrated StarRating collapses all five stars (zero height)
+                         until hover, and the tags TextBox outgrows its TextBlock. Without the grid's
+                         pinned RowHeight above, every hover re-measured the row and the list nudged
+                         itself a few pixels under the cursor. Keep new cell content within 22px. -->
                     <DataGridTemplateColumn Header="Rating" Width="90" CanUserSort="False">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
@@ -542,7 +664,7 @@
                                     </TextBlock>
                                     <TextBox Text="{Binding Tags, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
                                              BorderThickness="0" Background="Transparent"
-                                             VerticalAlignment="Center"
+                                             Padding="0" VerticalAlignment="Center"
                                              ToolTip="Comma-separated tags">
                                         <TextBox.Style>
                                             <Style TargetType="TextBox">
@@ -577,6 +699,8 @@
                                   IsEnabled="{Binding IsPlaylistView}"/>
                         <Separator/>
                         <MenuItem Header="Delete" Click="FileDelete_Click"/>
+                        <Separator/>
+                        <MenuItem Header="Properties" Click="FileProperties_Click"/>
                     </ContextMenu>
                 </DataGrid.ContextMenu>
             </DataGrid>
@@ -592,8 +716,451 @@
             </Border>
             </Grid>
 
+            <!-- Karaoke Lyrics Panel -->
+            <Border Grid.Row="2" Background="#FAFAFA" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0"
+                    Padding="10,6"
+                    Visibility="{Binding ShowLyrics, Converter={StaticResource BoolToVis}}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="MaxHeight" Value="220"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
+                                <Setter Property="MaxHeight" Value="340"/>
+                            </DataTrigger>
+                            <!-- Time-proportional row spacing needs extra room while sync-editing. -->
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsLyricsEditMode}" Value="True"/>
+                                    <Condition Binding="{Binding HasSyncedLyrics}" Value="True"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="MaxHeight" Value="340"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Header: now-playing title/status + Find / Sync / Karaoke / Edit / close.
+                         No Save/Cancel — lyrics auto-save (~500ms debounce, see
+                         MainViewModel.ScheduleLyricsAutoSave); "Edit" toggles to "Done". -->
+                    <Grid Grid.Row="0" Margin="0,0,0,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal">
+                            <TextBlock Text="{Binding NowPlaying.FileName, FallbackValue=Lyrics}"
+                                       FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" MaxWidth="220"/>
+                            <TextBlock Text="{Binding LyricsStatus}" FontSize="11" Foreground="#888888"
+                                       Margin="10,0,0,0" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <Button Content="Find" FontSize="11" Padding="8,2" Margin="3,0"
+                                    Command="{Binding FindLyricsCommand}">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsLyricsEditMode}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Button Content="Sync" FontSize="11" Padding="8,2" Margin="3,0"
+                                    Command="{Binding SyncLyricsWhisperCommand}"
+                                    Visibility="{Binding CanSyncLyrics, Converter={StaticResource BoolToVis}}"/>
+                            <Button Content="Karaoke" FontSize="11" Padding="8,2" Margin="3,0"
+                                    Command="{Binding ToggleKaraokeModeCommand}" ToolTip="Big-letter karaoke view">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
+                                                <Setter Property="Background" Value="#90CAF9"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <!-- Auto-scroll follow toggle: highlighted while the row list is actively
+                                 following the playhead, de-highlighted while frozen (row selected/
+                                 hovered/just manually scrolled — see MainWindow.xaml.cs
+                                 IsLyricsAutoScrollSuspended). Clicking clears the selection and
+                                 resumes following immediately — the discoverable way back, since a
+                                 selection freeze has no timeout. Only relevant for the row list, so
+                                 hidden in Karaoke view or when there's no timing to follow. -->
+                            <Button Content="Follow" FontSize="11" Padding="8,2" Margin="3,0"
+                                    Click="FollowLyricsButton_Click" ToolTip="Follow the playhead (auto-scroll)">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Setter Property="Background" Value="#90CAF9"/>
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding HasSyncedLyrics}" Value="True"/>
+                                                    <Condition Binding="{Binding KaraokeMode}" Value="False"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </MultiDataTrigger>
+                                            <DataTrigger Binding="{Binding LyricsFollowing}" Value="False">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <!-- Wipes the cached lyrics (DB row + in-memory) and drops into the empty
+                                 raw-paste box — the only way to replace a whole synced/bad result
+                                 (e.g. an old copyright-refusal saved before the AI-refusal fix), since
+                                 Edit on a synced track shows inline rows, not a paste box, and Find is
+                                 hidden in edit mode. Visible in both view and edit mode — unlike Find —
+                                 so it's always reachable to reset. CanSyncLyrics already tracks
+                                 "lyric lines loaded" regardless of synced state, so it's reused as-is
+                                 rather than adding a duplicate bool. -->
+                            <Button Content="Clear" FontSize="11" Padding="8,2" Margin="3,0"
+                                    Command="{Binding ClearLyricsCommand}"
+                                    Visibility="{Binding CanSyncLyrics, Converter={StaticResource BoolToVis}}"
+                                    ToolTip="Clear cached lyrics and start over"/>
+                            <Button FontSize="11" Padding="8,2" Margin="3,0"
+                                    Command="{Binding EditLyricsCommand}">
+                                <Button.Style>
+                                    <Style TargetType="Button">
+                                        <Setter Property="Content" Value="Edit"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsLyricsEditMode}" Value="True">
+                                                <Setter Property="Content" Value="Done"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Button Content="&#10005;" FontSize="11" Padding="6,2" Margin="8,0,0,0"
+                                    Command="{Binding ToggleLyricsCommand}" ToolTip="Hide lyrics"
+                                    Background="Transparent" BorderThickness="0" Foreground="#888888" Cursor="Hand"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- View/edit mode: scrolling line list, active line highlighted, per-line timing
+                         controls. Stays visible while editing a SYNCED track (HasSyncedLyrics) — the
+                         row's text becomes an inline editable TextBox instead of collapsing the whole
+                         list for the raw textbox below, so editing words never loses timestamps. Only
+                         collapses for edit mode on plain/unsynced lyrics (the raw textbox owns that case). -->
+                    <ListBox x:Name="LyricsListBox" Grid.Row="1"
+                             ItemsSource="{Binding LyricsLines}"
+                             Focusable="False"
+                             BorderThickness="0" Background="Transparent"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.CanContentScroll="False"
+                             ScrollViewer.ScrollChanged="LyricsListBox_ScrollChanged"
+                             SelectionChanged="LyricsListBox_SelectionChanged"
+                             KeyDown="LyricsListBox_KeyDown"
+                             ButtonBase.Click="LyricsRowButton_Click">
+                        <ListBox.Style>
+                            <Style TargetType="ListBox">
+                                <Setter Property="Visibility" Value="Visible"/>
+                                <Setter Property="Margin" Value="0"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding IsLyricsEditMode}" Value="True"/>
+                                            <Condition Binding="{Binding HasSyncedLyrics}" Value="False"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </MultiDataTrigger>
+                                    <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListBox.Style>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Top spacer sized by GapPx (MainViewModel.RecomputeLyricRowGaps) makes the
+                                     list read as a time-proportional layout — sparse where lines are far
+                                     apart, tight where they come fast — instead of an even stack. Zero for
+                                     plain/unsynced lyrics, so those still stack normally. -->
+                                <StackPanel Orientation="Vertical">
+                                    <Border Height="{Binding GapPx}"/>
+                                    <!-- Highlight band behind the active row (view AND edit mode, since this
+                                         row list stays visible in both for synced tracks). Wraps only the
+                                         content Grid below — the spacer Border above stays transparent. -->
+                                    <Border CornerRadius="3">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                        <Setter Property="Background" Value="#DCEBFB"/>
+                                                        <Setter Property="Padding" Value="4,1"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                    <Grid Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding TimeFormatted}"
+                                               FontFamily="Consolas" FontSize="10" Foreground="#AAAAAA"
+                                               VerticalAlignment="Center" Margin="0,0,6,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="#1565C0"/>
+                                                            <Setter Property="FontWeight" Value="Bold"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    <!-- Read-only text (normal view) vs. inline editable text (Edit mode on a
+                                         synced track — this row list stays visible instead of the raw
+                                         textbox, see LyricsListBox.Style above). Both bind DataContext
+                                         through the ListBox since IsLyricsEditMode lives on the VM, not
+                                         this row's own LyricLine DataContext. -->
+                                    <Grid Grid.Column="1">
+                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="13"
+                                                   Foreground="#777777" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding DataContext.IsLyricsEditMode, RelativeSource={RelativeSource AncestorType=ListBox}}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="#1565C0"/>
+                                                            <Setter Property="FontWeight" Value="Bold"/>
+                                                            <Setter Property="FontSize" Value="15"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBox Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
+                                                 FontSize="13" TextWrapping="Wrap"
+                                                 BorderThickness="0" Background="Transparent" Padding="0"
+                                                 VerticalAlignment="Center" VerticalContentAlignment="Center">
+                                            <TextBox.Style>
+                                                <Style TargetType="TextBox">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding DataContext.IsLyricsEditMode, RelativeSource={RelativeSource AncestorType=ListBox}}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="#1565C0"/>
+                                                            <Setter Property="FontWeight" Value="Bold"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBox.Style>
+                                        </TextBox>
+                                    </Grid>
+                                    <!-- Hand-timing controls: "now" stamps the current playback position,
+                                         −/+ nudge by 0.2s. Work on plain (Time=0) lines too, not just
+                                         already-synced ones — that's how a failed/skipped auto-sync gets
+                                         hand-timed (see MainViewModel.RunWhisperSyncAsync). -->
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button Content="&#8722;" FontSize="10" Padding="4,0" Margin="2,0"
+                                                Command="{Binding DataContext.NudgeLyricLineBackCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding}" ToolTip="-0.2s"/>
+                                        <Button Content="&#9210;" FontSize="10" Padding="4,0" Margin="2,0"
+                                                Command="{Binding DataContext.SetLyricLineNowCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding}" ToolTip="Set to current playback position"/>
+                                        <Button Content="+" FontSize="10" Padding="4,0" Margin="2,0"
+                                                Command="{Binding DataContext.NudgeLyricLineForwardCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding}" ToolTip="+0.2s"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    </Border>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- "Now" playhead: a thin accent line marking the current time's position in the
+                         time-proportional row list. Positioned via a TranslateTransform in code-behind
+                         (MainWindow.xaml.cs UpdateLyricsPlayhead), matching the album-cover positioning
+                         idiom elsewhere in this file — not a Margin, which would participate in layout.
+                         Computed from the ScrollViewer's real VerticalOffset (not just pinned to the
+                         viewport centre), so it stays correct whether auto-scroll, a manual scroll, or a
+                         paused track left the list where it is. Visibility/position both driven entirely
+                         from code-behind since they depend on live scroll geometry, not a bindable VM
+                         property. -->
+                    <Border x:Name="LyricsPlayheadLine" Grid.Row="1" Height="2" Background="#1565C0"
+                            VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                            IsHitTestVisible="False" Visibility="Collapsed">
+                        <Border.RenderTransform>
+                            <TranslateTransform x:Name="LyricsPlayheadTransform"/>
+                        </Border.RenderTransform>
+                    </Border>
+
+                    <!-- Edit mode on PLAIN/unsynced lyrics only — there's no timing to lose, so a raw
+                         multiline textbox is the right tool. Synced tracks edit inline in the row
+                         list above instead (LyricsListBox stays visible; see its Style). -->
+                    <TextBox Grid.Row="1"
+                             Text="{Binding LyricsEditText, UpdateSourceTrigger=PropertyChanged}"
+                             AcceptsReturn="True" TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto"
+                             FontSize="12">
+                        <TextBox.Style>
+                            <Style TargetType="TextBox">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding IsLyricsEditMode}" Value="True"/>
+                                            <Condition Binding="{Binding HasSyncedLyrics}" Value="False"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBox.Style>
+                    </TextBox>
+
+                    <!-- Karaoke big view: EVERY line renders in a stable ItemsControl (KaraokeWindow,
+                         one KaraokeWindowLine per LyricsLines entry, built once per track); the
+                         current line is kept centered by animating a TranslateTransform on the
+                         ItemsControl (see MainWindow.xaml.cs PanKaraokeToCurrentLine), which glides
+                         the whole song smoothly rather than popping between line swaps. ClipToBounds
+                         + OpacityMask on the VIEWPORT (not the transformed ItemsControl itself — an
+                         OpacityMask on a transformed element is measured pre-transform, in the
+                         element's own oversized bounds, and wouldn't line up with what's actually
+                         visible) crop it down to a window with faded top/bottom edges. Separate from
+                         the list/edit views. -->
+                    <Grid Grid.Row="1" x:Name="KaraokeViewport" ClipToBounds="True">
+                        <Grid.Style>
+                            <Style TargetType="Grid">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding IsLyricsEditMode}" Value="False"/>
+                                            <Condition Binding="{Binding KaraokeMode}" Value="True"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Grid.Style>
+                        <Grid.OpacityMask>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Color="#00000000" Offset="0.0"/>
+                                <GradientStop Color="#FF000000" Offset="0.15"/>
+                                <GradientStop Color="#FF000000" Offset="0.85"/>
+                                <GradientStop Color="#00000000" Offset="1.0"/>
+                            </LinearGradientBrush>
+                        </Grid.OpacityMask>
+
+                        <TextBlock Text="Sync lyrics to use Karaoke mode — tap Find or Sync above."
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="#999999" FontSize="12" TextWrapping="Wrap"
+                                   TextAlignment="Center" MaxWidth="260">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasSyncedLyrics}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <!-- Falloff by |Offset| (clamped in the VM) = dimmer + smaller; IsCurrent is
+                             the big/bright line the pan keeps centered. -->
+                        <ItemsControl x:Name="KaraokeItemsControl" ItemsSource="{Binding KaraokeWindow}"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <ItemsControl.RenderTransform>
+                                <TranslateTransform x:Name="KaraokePanTransform"/>
+                            </ItemsControl.RenderTransform>
+                            <ItemsControl.Style>
+                                <Style TargetType="ItemsControl">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasSyncedLyrics}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ItemsControl.Style>
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Vertical"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Text}" HorizontalAlignment="Center"
+                                               TextWrapping="Wrap" TextAlignment="Center" Margin="0,3">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="FontSize" Value="15"/>
+                                                <Setter Property="Foreground" Value="#AAAAAA"/>
+                                                <Setter Property="FontWeight" Value="Normal"/>
+                                                <!-- Baseline for a non-current line at Offset=0 too — the anchor-at-song-start
+                                                     case (no active line yet) matches no numbered trigger below. -->
+                                                <Setter Property="Opacity" Value="0.9"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="-1">
+                                                        <Setter Property="FontSize" Value="18"/>
+                                                        <Setter Property="Opacity" Value="0.75"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="1">
+                                                        <Setter Property="FontSize" Value="18"/>
+                                                        <Setter Property="Opacity" Value="0.75"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="-2">
+                                                        <Setter Property="FontSize" Value="15"/>
+                                                        <Setter Property="Opacity" Value="0.55"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="2">
+                                                        <Setter Property="FontSize" Value="15"/>
+                                                        <Setter Property="Opacity" Value="0.55"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="-3">
+                                                        <Setter Property="FontSize" Value="13"/>
+                                                        <Setter Property="Opacity" Value="0.35"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding Offset}" Value="3">
+                                                        <Setter Property="FontSize" Value="13"/>
+                                                        <Setter Property="Opacity" Value="0.35"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                        <Setter Property="FontSize" Value="32"/>
+                                                        <Setter Property="Foreground" Value="#1565C0"/>
+                                                        <Setter Property="FontWeight" Value="SemiBold"/>
+                                                        <Setter Property="Opacity" Value="1"/>
+                                                        <Setter Property="Margin" Value="0,10"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+                </Grid>
+            </Border>
+
             <!-- Audio Player Control -->
-            <Border Grid.Row="2" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10"
+            <Border Grid.Row="3" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10"
                     MouseWheel="PlayerPanel_MouseWheel">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -609,12 +1176,34 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <!-- Now Playing Info -->
-                        <TextBlock Grid.Row="0"
-                                   Text="{Binding NowPlaying.FileName, FallbackValue='No file playing'}"
-                                   FontSize="14" FontWeight="SemiBold"
-                                   TextTrimming="CharacterEllipsis"
-                                   Margin="0,0,10,5"/>
+                        <!-- Now Playing Info + current-file actions. Rating/tags bind straight at
+                             NowPlaying (a MusicFile instance out of MusicFiles), so MainViewModel's
+                             File_PropertyChanged hook persists edits here exactly like the grid's. -->
+                        <Grid Grid.Row="0" Margin="0,0,10,5">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="{Binding NowPlaying.FileName, FallbackValue='No file playing'}"
+                                       FontSize="14" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                                        IsEnabled="{Binding NowPlaying, Converter={StaticResource NullToBoolConverter}}">
+                                <controls:StarRating Rating="{Binding NowPlaying.Rating, Mode=TwoWay}" EditMode="True"
+                                                     VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBox Width="160" Height="20" VerticalContentAlignment="Center"
+                                         Text="{Binding NowPlaying.Tags, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                         ToolTip="Comma-separated tags" Margin="0,0,8,0"/>
+                                <Button Content="Copy" Padding="8,1" Margin="0,0,4,0"
+                                        Click="NowPlayingCopy_Click" ToolTip="Copy the playing file"/>
+                                <Button Content="Move" Padding="8,1" Margin="0,0,4,0"
+                                        Click="NowPlayingMove_Click" ToolTip="Move the playing file"/>
+                                <Button Content="Delete" Padding="8,1"
+                                        Click="NowPlayingDelete_Click" ToolTip="Delete the playing file"/>
+                            </StackPanel>
+                        </Grid>
 
                         <!-- Progress Slider -->
                         <Grid Grid.Row="1" Margin="0,5,10,5">
@@ -694,6 +1283,19 @@
                                         </Style>
                                     </Button.Style>
                                 </Button>
+                                <Button Command="{Binding StartKaraokeCommand}" ToolTip="Karaoke" Content="&#x1F3A4;">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Setter Property="Foreground" Value="#BBBBBB"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
+                                                    <Setter Property="Background" Value="#90CAF9"/>
+                                                    <Setter Property="Foreground" Value="Black"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                             </StackPanel>
 
                             <!-- Remote playback indicator + kill switch (click to take audio back to this PC) -->
@@ -717,9 +1319,16 @@
 
                             <!-- Output Device + Volume Controls -->
                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <!-- WASAPI buffer size -->
+                                <ComboBox Width="60" Height="22"
+                                          VerticalAlignment="Center" Margin="0,0,4,0"
+                                          ItemsSource="{Binding BufferOptions}"
+                                          SelectedItem="{Binding OutputBufferMs, Mode=TwoWay}"
+                                          ItemStringFormat="{}{0} ms"
+                                          ToolTip="Audio buffer — higher survives high CPU load, lower gives snappier volume/seek response"/>
                                 <!-- Output device selector -->
                                 <ComboBox x:Name="OutputDeviceBox"
-                                          Width="250" Height="22"
+                                          Width="190" Height="22"
                                           VerticalAlignment="Center" Margin="0,0,10,0"
                                           ItemsSource="{Binding OutputDevices}"
                                           SelectedItem="{Binding SelectedOutputDevice, Mode=TwoWay}"

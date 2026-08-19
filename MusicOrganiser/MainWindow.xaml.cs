@@ -1,10 +1,12 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -12,15 +14,50 @@ using System.Windows.Media.Animation;
 using Microsoft.Win32;
 using MusicOrganiser.Dialogs;
 using MusicOrganiser.Models;
+using MusicOrganiser.Services;
 using MusicOrganiser.ViewModels;
 
 namespace MusicOrganiser;
+
+/// <summary>One checkable row in the folder-tree tag filter popup.</summary>
+public class TagFilterOption : INotifyPropertyChanged
+{
+    public string Name { get; }
+    private bool _isChecked;
+    public bool IsChecked
+    {
+        get => _isChecked;
+        set
+        {
+            if (_isChecked == value) return;
+            _isChecked = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked)));
+        }
+    }
+    public TagFilterOption(string name, bool isChecked = false)
+    {
+        Name = name;
+        _isChecked = isChecked;
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
 
 public partial class MainWindow : Window
 {
     private MainViewModel ViewModel => (MainViewModel)DataContext;
     private FolderNode? _rightClickedFolder;
     private Playlist? _rightClickedPlaylist;
+
+    // Folder-tree tag filter: the checked tag names, kept across popup re-opens (the popup's
+    // CheckBox list itself is rebuilt every open to pick up newly-saved tags).
+    private readonly HashSet<string> _selectedFolderTagFilters = new(StringComparer.OrdinalIgnoreCase);
+
+    // Lyrics row-list auto-scroll (follows the playhead; see AutoScrollLyrics below).
+    private ScrollViewer? _lyricsScrollViewer;
+    private bool _lyricsProgrammaticScroll;
+    private DateTime _lastManualLyricsScrollUtc = DateTime.MinValue;
+    // ponytail: how long a manual scroll suspends auto-scroll for — the knob.
+    private static readonly TimeSpan LyricsAutoScrollResumeDelay = TimeSpan.FromSeconds(5);
 
     public MainWindow()
     {
@@ -30,6 +67,10 @@ public partial class MainWindow : Window
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
         viewModel.MusicFiles.CollectionChanged += (s, e) =>
             Dispatcher.BeginInvoke(new Action(UpdateAlbumCoverPosition),
+                System.Windows.Threading.DispatcherPriority.Background);
+        // Startup: bring the re-selected last-played row into view once the grid has filled.
+        viewModel.SelectionRestored += file =>
+            Dispatcher.BeginInvoke(new Action(() => MusicFilesGrid.ScrollIntoView(file)),
                 System.Windows.Threading.DispatcherPriority.Background);
         Closed += (s, e) => ViewModel.Dispose();
         Loaded += MainWindow_Loaded;
@@ -64,6 +105,86 @@ public partial class MainWindow : Window
     {
         ViewModel.FolderTree.FilterText = string.Empty;
         FilterBox.Focus();
+    }
+
+    // Selects the parent of the currently selected folder (root-level: just collapses it).
+    // Selecting the parent auto-expands it (FolderNode.IsSelected), so it's already expanded
+    // here (its child was visible) and UnfoldedBySelection comes out false — the band-folder
+    // auto-descend (JumpIntoFirstAlbumAsync) only fires on an actual unfold, so it won't loop
+    // straight back into the folder we just left.
+    private void UpLevel_Click(object sender, RoutedEventArgs e)
+    {
+        if (FolderTreeView.SelectedItem is not FolderNode current) return;
+
+        var parent = current.Parent;
+        if (parent == null)
+        {
+            current.IsExpanded = false;
+            return;
+        }
+
+        parent.IsSelected = true;
+        parent.IsExpanded = false; // fold the level we were browsing
+        Dispatcher.BeginInvoke(new Action(() => ScrollTreeToFolder(parent.FullPath)),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    // Re-reads the tag vocabulary every open so newly-saved tags show up, preserving
+    // previously checked selections.
+    private void TagsFilterPopup_Opened(object sender, EventArgs e)
+    {
+        var allTags = DatabaseService.Instance.GetAllTagNames();
+        var options = allTags
+            .Select(t => new TagFilterOption(t, _selectedFolderTagFilters.Contains(t)))
+            .ToList();
+        TagsFilterItemsControl.ItemsSource = options;
+    }
+
+    private void TagFilterCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox { DataContext: TagFilterOption opt })
+        {
+            if (opt.IsChecked) _selectedFolderTagFilters.Add(opt.Name);
+            else _selectedFolderTagFilters.Remove(opt.Name);
+        }
+        ApplyFolderTagFilter();
+    }
+
+    private void TagsFilterClear_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedFolderTagFilters.Clear();
+        if (TagsFilterItemsControl.ItemsSource is IEnumerable<TagFilterOption> options)
+        {
+            foreach (var o in options) o.IsChecked = false;
+        }
+        ApplyFolderTagFilter();
+        TagsFilterPopup.IsOpen = false;
+    }
+
+    private void ApplyFolderTagFilter()
+    {
+        ViewModel.FolderTree.SelectedTags = _selectedFolderTagFilters.ToList();
+        TagsFilterToggle.Content = _selectedFolderTagFilters.Count == 0
+            ? "Tags"
+            : $"Tags ({_selectedFolderTagFilters.Count})";
+    }
+
+    private async void ManageTags_Click(object sender, RoutedEventArgs e)
+    {
+        TagsFilterPopup.IsOpen = false;
+
+        var dlg = new TagManagerDialog { Owner = this };
+        dlg.ShowDialog();
+        if (!dlg.Changed) return;
+
+        // A deleted/merged-away tag can no longer be selected in the filter.
+        var validTags = new HashSet<string>(DatabaseService.Instance.GetAllTagNames(), StringComparer.OrdinalIgnoreCase);
+        _selectedFolderTagFilters.RemoveWhere(t => !validTags.Contains(t));
+        ApplyFolderTagFilter();
+
+        // Loaded tree nodes' Tags strings are stale, and even an unchanged selection can gain
+        // matches (a merge can move folders onto an already-selected tag) — force a full refresh.
+        await ViewModel.FolderTree.RefreshAllFolderTagsAsync();
     }
 
     private void CoverHost_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateAlbumCoverPosition();
@@ -162,6 +283,188 @@ public partial class MainWindow : Window
         // Now-playing row highlight updates automatically via the NowPlayingConverter
         // MultiBinding (it watches DataContext.NowPlaying). Do NOT call Items.Refresh()
         // here: it regenerates every row container and wipes the StarRating cell display.
+
+        if (e.PropertyName == nameof(MainViewModel.CurrentLyricIndex) || e.PropertyName == nameof(MainViewModel.KaraokeMode))
+        {
+            // Deferred to Background priority: the karaoke view may have just become visible
+            // (KaraokeMode flip) or KaraokeWindow may have just been rebuilt for a new track —
+            // either way the item containers PanKaraokeToCurrentLine measures need a layout
+            // pass first (mirrors UpdateAlbumCoverPosition's own deferred BeginInvoke).
+            Dispatcher.BeginInvoke(new Action(PanKaraokeToCurrentLine),
+                System.Windows.Threading.DispatcherPriority.Background);
+
+            // Karaoke mode swaps the row list out for the big view — re-check the playhead's own
+            // visibility immediately rather than waiting for the next CurrentPosition tick (which
+            // only fires while playing; toggling Karaoke while paused would otherwise leave a
+            // stale line drawn over the big view).
+            if (e.PropertyName == nameof(MainViewModel.KaraokeMode))
+                UpdateLyricsPlayhead();
+        }
+
+        // Lyrics row list follows the playhead too (see AutoScrollLyrics) — unlike the earlier
+        // per-line attempt this scrolls continuously with elapsed time (matching the
+        // time-proportional row layout) rather than snapping on every CurrentLyricIndex tick,
+        // and backs off for a few seconds after the user scrolls manually.
+        if (e.PropertyName == nameof(MainViewModel.CurrentPosition))
+        {
+            AutoScrollLyrics();
+            UpdateLyricsPlayhead();
+            RefreshLyricsFollowState();
+        }
+    }
+
+    // Auto-scroll is suspended — INDEFINITELY, no timeout — while a row is selected: the whole
+    // point of selecting a line is to wait, possibly 30s+, for the vocal to come around before
+    // tapping ⏺, and a timeout would yank the view away exactly then. Hovering the list also
+    // suspends it (stops the target moving while the user's reaching for a row's buttons, even
+    // before they click), and a recent manual scroll suspends it for the existing short window.
+    private bool IsLyricsAutoScrollSuspended()
+    {
+        if (LyricsListBox.SelectedItem != null) return true;
+        if (LyricsListBox.IsMouseOver) return true;
+        return DateTime.UtcNow - _lastManualLyricsScrollUtc < LyricsAutoScrollResumeDelay;
+    }
+
+    // Keeps the lyrics row list scrolled so "now" sits vertically centered, using the same
+    // content-Y-per-second as the row layout itself (RecomputeLyricRowGaps): since gaps have the
+    // row height already subtracted out, content Y for time T is exactly
+    // T * MainViewModel.LyricRowPxPerSecond. Skips while the panel's hidden, lyrics aren't
+    // synced, playback is paused, or the user is working the list (IsLyricsAutoScrollSuspended).
+    private void AutoScrollLyrics()
+    {
+        if (!ViewModel.ShowLyrics || !ViewModel.HasSyncedLyrics || !ViewModel.IsPlaying) return;
+        if (IsLyricsAutoScrollSuspended()) return;
+        ScrollLyricsToPlayhead();
+    }
+
+    private void ScrollLyricsToPlayhead()
+    {
+        _lyricsScrollViewer ??= FindScrollViewer(LyricsListBox);
+        if (_lyricsScrollViewer == null) return;
+
+        var targetOffset = Math.Max(0,
+            ViewModel.CurrentPosition.TotalSeconds * MainViewModel.LyricRowPxPerSecond
+            - _lyricsScrollViewer.ViewportHeight / 2.0);
+
+        _lyricsProgrammaticScroll = true;
+        _lyricsScrollViewer.ScrollToVerticalOffset(targetOffset);
+        // ScrollChanged fires on the next layout pass, not synchronously — clear the flag after
+        // one, mirroring the deferred-BeginInvoke idiom used elsewhere in this file.
+        Dispatcher.BeginInvoke(new Action(() => _lyricsProgrammaticScroll = false),
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private void LyricsListBox_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (!_lyricsProgrammaticScroll)
+            _lastManualLyricsScrollUtc = DateTime.UtcNow; // user-initiated — suspend auto-scroll briefly
+        UpdateLyricsPlayhead(); // keep the line correct while the user drags the scrollbar/wheels
+        RefreshLyricsFollowState();
+    }
+
+    private void LyricsListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        => RefreshLyricsFollowState();
+
+    // A Button's own MouseLeftButtonDown handling stops it bubbling to the ListBoxItem's usual
+    // click-to-select logic, so the ⏺/−/+ row buttons wouldn't otherwise select their row — hook
+    // the (always-bubbling) Click event at the ListBox instead and select explicitly, so the
+    // freeze engages on the very first tap rather than needing a separate click on the row text.
+    private void LyricsRowButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is FrameworkElement { DataContext: LyricLine line })
+            LyricsListBox.SelectedItem = line;
+    }
+
+    // Esc is the discoverable way out of an indefinite selection freeze without knowing about the
+    // Follow button.
+    private void LyricsListBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        ReleaseLyricsAutoScrollFreeze();
+        e.Handled = true;
+    }
+
+    private void FollowLyricsButton_Click(object sender, RoutedEventArgs e) => ReleaseLyricsAutoScrollFreeze();
+
+    // Clears the selection freeze and snaps the list back to the playhead immediately — even
+    // while paused, where AutoScrollLyrics itself won't run (nothing to continuously follow) but
+    // the user still expects the view to jump back on demand.
+    private void ReleaseLyricsAutoScrollFreeze()
+    {
+        LyricsListBox.SelectedItem = null;
+        if (ViewModel.ShowLyrics && ViewModel.HasSyncedLyrics)
+            ScrollLyricsToPlayhead();
+        UpdateLyricsPlayhead();
+        RefreshLyricsFollowState();
+    }
+
+    // Pushes the current freeze state to the VM so the header's "Follow" toggle button can bind
+    // to it with the same DataTrigger idiom as the Karaoke toggle (see MainWindow.xaml).
+    private void RefreshLyricsFollowState() => ViewModel.LyricsFollowing = !IsLyricsAutoScrollSuspended();
+
+    // Positions LyricsPlayheadLine at the current time's content-Y minus however far the list is
+    // actually scrolled — NOT just pinned to the viewport centre, since that's only right while
+    // AutoScrollLyrics is actively driving the scroll. Reading the ScrollViewer's real
+    // VerticalOffset instead keeps it correct after a manual scroll or while paused. Content-Y
+    // uses the same MainViewModel.LyricRowPxPerSecond scale as RecomputeLyricRowGaps.
+    private void UpdateLyricsPlayhead()
+    {
+        if (!ViewModel.ShowLyrics || !ViewModel.HasSyncedLyrics || ViewModel.KaraokeMode)
+        {
+            LyricsPlayheadLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _lyricsScrollViewer ??= FindScrollViewer(LyricsListBox);
+        if (_lyricsScrollViewer == null)
+        {
+            LyricsPlayheadLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var playheadY = ViewModel.CurrentPosition.TotalSeconds * MainViewModel.LyricRowPxPerSecond
+            - _lyricsScrollViewer.VerticalOffset;
+
+        if (playheadY < 0 || playheadY > _lyricsScrollViewer.ViewportHeight)
+        {
+            LyricsPlayheadLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        LyricsPlayheadTransform.Y = playheadY;
+        LyricsPlayheadLine.Visibility = Visibility.Visible;
+    }
+
+    // Keeps the karaoke big view's current line vertically centered by animating a
+    // TranslateTransform on the (structurally stable — see KaraokeWindow's own comment)
+    // ItemsControl, so the song appears to glide smoothly past rather than swapping instantly.
+    private void PanKaraokeToCurrentLine()
+    {
+        var idx = ViewModel.CurrentLyricIndex;
+        if (idx < 0 || idx >= KaraokeItemsControl.Items.Count) return;
+        if (KaraokeItemsControl.ItemContainerGenerator.ContainerFromIndex(idx) is not FrameworkElement row) return;
+
+        double rowCenter;
+        try
+        {
+            rowCenter = row.TransformToAncestor(KaraokeViewport).Transform(new Point(0, row.ActualHeight / 2)).Y;
+        }
+        catch (InvalidOperationException)
+        {
+            return; // not yet in the visual tree / no common ancestor — try again next change
+        }
+        var viewportCenter = KaraokeViewport.ActualHeight / 2;
+
+        // rowCenter already reflects whatever pan offset is currently applied (TransformToAncestor
+        // walks the live render transform), so the delta needed is purely how far off-center it
+        // still is — add that to the CURRENT transform value, don't replace it.
+        var targetY = KaraokePanTransform.Y + (viewportCenter - rowCenter);
+
+        var animation = new DoubleAnimation(KaraokePanTransform.Y, targetY, new Duration(TimeSpan.FromMilliseconds(350)))
+        {
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut }
+        };
+        KaraokePanTransform.BeginAnimation(TranslateTransform.YProperty, animation);
     }
 
     private void FolderTreeView_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
@@ -172,7 +475,40 @@ public partial class MainWindow : Window
             // Reclaim horizontal space: scroll so the selected node's parent sits at the left edge.
             Dispatcher.BeginInvoke(new Action(AlignSelectedHorizontally),
                 System.Windows.Threading.DispatcherPriority.Background);
+            _ = JumpIntoFirstAlbumAsync(folder);
         }
+    }
+
+    // Band folder = holds only album subfolders (no tracks of its own, nothing nested deeper).
+    // Selecting one drops straight into the first album so there's no dead click — but only on
+    // the unfold; re-selecting an already-open folder leaves the selection alone.
+    private async Task JumpIntoFirstAlbumAsync(FolderNode folder)
+    {
+        if (!folder.UnfoldedBySelection) return;
+        await folder.EnsureLoadedAsync();
+        await folder.EnsureRefreshedAsync();
+        if (!folder.IsSelected) return; // selection moved on while loading
+
+        var children = folder.Children.Where(c => !string.IsNullOrEmpty(c.FullPath)).ToList();
+        if (children.Count == 0) return;
+
+        var isBandFolder = await Task.Run(() =>
+        {
+            try
+            {
+                if (Services.MusicMetadataService.EnumerateSupportedFiles(folder.FullPath).Any())
+                    return false;
+                return children.All(c =>
+                {
+                    try { return !Directory.EnumerateDirectories(c.FullPath).Any(); }
+                    catch { return true; }
+                });
+            }
+            catch { return false; }
+        });
+
+        if (isBandFolder && folder.IsSelected)
+            children[0].IsSelected = true;
     }
 
     // Scrolls the tree horizontally so the selected node's parent (one level up) aligns to the
@@ -491,6 +827,32 @@ public partial class MainWindow : Window
             ViewModel.PlayFolderCommand.Execute(_rightClickedFolder);
     }
 
+    private void FolderNewSubfolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+
+        var dlg = new TextInputDialog("New Subfolder", "Folder name:", "New Folder") { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        var name = dlg.InputText;   // already trimmed
+        if (name.Length == 0) return;
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(_rightClickedFolder.FullPath, name));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to create folder: {ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        // Expand first: Refresh() only reloads children when the node is open.
+        _rightClickedFolder.IsExpanded = true;
+        _rightClickedFolder.Refresh();
+    }
+
     private void FolderRefresh_Click(object sender, RoutedEventArgs e)
     {
         if (_rightClickedFolder == null) return;
@@ -502,6 +864,58 @@ public partial class MainWindow : Window
         {
             ViewModel.LoadFolder(_rightClickedFolder.FullPath);
         }
+    }
+
+    private void FolderTag_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+        var folder = _rightClickedFolder;
+
+        List<string> albums;
+        try
+        {
+            albums = Directory.GetDirectories(folder.FullPath)
+                .Select(d => Path.GetFileName(d) ?? string.Empty)
+                .Where(n => n.Length > 0)
+                .ToList();
+        }
+        catch
+        {
+            albums = new List<string>();
+        }
+
+        var dlg = new FolderTagDialog(folder.Name, folder.Tags,
+            () => ViewModel.SuggestFolderTagsAsync(folder.Name, albums))
+        {
+            Owner = this
+        };
+
+        if (dlg.ShowDialog() == true)
+        {
+            folder.Tags = dlg.ResultTags;
+        }
+    }
+
+    private void BulkTag_Click(object sender, RoutedEventArgs e)
+    {
+        if (_rightClickedFolder == null) return;
+        var folder = _rightClickedFolder;
+
+        var dlg = new BulkTagDialog(folder.FullPath,
+            (band, albums) => ViewModel.SuggestFolderTagsAsync(band, albums),
+            (path, tags) =>
+            {
+                // Reflect a saved row in an already-loaded tree node immediately (no-op for
+                // unloaded ones) — fires on every Apply, not just when the dialog closes.
+                var child = folder.Children.FirstOrDefault(c =>
+                    c.FullPath.Equals(path, StringComparison.OrdinalIgnoreCase));
+                if (child != null) child.Tags = tags;
+            })
+        {
+            Owner = this
+        };
+
+        dlg.ShowDialog();
     }
 
     private async void FolderCopyBrowse_Click(object sender, RoutedEventArgs e)
@@ -708,9 +1122,10 @@ public partial class MainWindow : Window
         {
             foreach (var file in selectedFiles)
             {
-                await ViewModel.FileOperations.DeleteFileAsync(file.FullPath);
+                // VM-level delete: drops the row and hands playback to the next track if this
+                // one was playing (a folder reload here would rebuild the queue instead).
+                await ViewModel.DeleteFileAsync(file.FullPath);
             }
-            ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
         }
     }
 
@@ -732,9 +1147,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private async System.Threading.Tasks.Task CopySelectedFiles(string destinationFolder)
+    private System.Threading.Tasks.Task CopySelectedFiles(string destinationFolder) => CopyFiles(GetSelectedFiles(), destinationFolder);
+    private System.Threading.Tasks.Task MoveSelectedFiles(string destinationFolder) => MoveFiles(GetSelectedFiles(), destinationFolder);
+
+    private async System.Threading.Tasks.Task CopyFiles(IList<MusicFile> selectedFiles, string destinationFolder)
     {
-        var selectedFiles = GetSelectedFiles();
         FileDuplicateAction? applyToAll = null;
 
         foreach (var file in selectedFiles)
@@ -797,9 +1214,8 @@ public partial class MainWindow : Window
         }
     }
 
-    private async System.Threading.Tasks.Task MoveSelectedFiles(string destinationFolder)
+    private async System.Threading.Tasks.Task MoveFiles(IList<MusicFile> selectedFiles, string destinationFolder)
     {
-        var selectedFiles = GetSelectedFiles();
         foreach (var file in selectedFiles)
         {
             await ViewModel.FileOperations.MoveFileAsync(file.FullPath, destinationFolder);
@@ -974,6 +1390,14 @@ public partial class MainWindow : Window
     private List<MusicFile> GetSelectedFiles()
     {
         return MusicFilesGrid.SelectedItems.Cast<MusicFile>().ToList();
+    }
+
+    private void FileProperties_Click(object sender, RoutedEventArgs e)
+    {
+        // ponytail: multi-select shows the first file's properties; a per-file dialog each would be worse.
+        var file = GetSelectedFiles().FirstOrDefault();
+        if (file == null) return;
+        new FilePropertiesDialog(file) { Owner = this }.ShowDialog();
     }
 
     #endregion
@@ -1228,6 +1652,196 @@ public partial class MainWindow : Window
             return dialog.FolderName;
         }
         return null;
+    }
+
+    #endregion
+
+    #region Drag & drop (grid files / tree folders -> a tree folder)
+
+    // ponytail: plain WPF DoDragDrop — no drag adorner, insertion line, or hover-to-auto-expand.
+    // Move by default, Ctrl = copy (Explorer convention); the drop target is always a folder-tree
+    // node, and both payloads land on the same Copy/Move helpers the context menus already use.
+    private const string FilesDragFormat = "MusicOrganiser.Files";
+    private const string FolderDragFormat = "MusicOrganiser.Folder";
+    private Point _dragStart;
+
+    private void DragSource_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        => _dragStart = e.GetPosition(null);
+
+    private bool PastDragThreshold(MouseEventArgs e)
+    {
+        var now = e.GetPosition(null);
+        return Math.Abs(now.X - _dragStart.X) > SystemParameters.MinimumHorizontalDragDistance
+            || Math.Abs(now.Y - _dragStart.Y) > SystemParameters.MinimumVerticalDragDistance;
+    }
+
+    private void MusicFilesGrid_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || !PastDragThreshold(e)) return;
+        // Only rows drag: keeps the scrollbar, headers and empty space behaving normally.
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) == null) return;
+
+        var files = GetSelectedFiles();
+        if (files.Count == 0) return;
+
+        DragDrop.DoDragDrop(MusicFilesGrid, new DataObject(FilesDragFormat, files),
+            DragDropEffects.Move | DragDropEffects.Copy);
+    }
+
+    private void FolderTreeView_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || !PastDragThreshold(e)) return;
+        if (FindAncestor<ToggleButton>(e.OriginalSource as DependencyObject) != null) return;  // expander click
+
+        var node = FindAncestor<TreeViewItem>(e.OriginalSource as DependencyObject)?.DataContext as FolderNode;
+        // Parent == null is a drive root (not movable); the Exists check rules out dummy/stale nodes.
+        if (node?.Parent == null || !Directory.Exists(node.FullPath)) return;
+
+        DragDrop.DoDragDrop(FolderTreeView, new DataObject(FolderDragFormat, node),
+            DragDropEffects.Move | DragDropEffects.Copy);
+    }
+
+    /// <summary>The folder this drop would land in, or null when the drag can't be dropped here
+    /// (unknown payload, missing folder, or a no-op/illegal folder move).</summary>
+    private static FolderNode? DropTarget(object sender, DragEventArgs e)
+    {
+        if (sender is not TreeViewItem item || item.DataContext is not FolderNode target) return null;
+        if (!Directory.Exists(target.FullPath)) return null;
+
+        if (e.Data.GetDataPresent(FilesDragFormat))
+        {
+            var files = (IList<MusicFile>)e.Data.GetData(FilesDragFormat)!;
+            // Files already living in the target folder have nowhere to go.
+            return files.Any(f => !SamePath(Path.GetDirectoryName(f.FullPath), target.FullPath)) ? target : null;
+        }
+
+        if (e.Data.GetDataPresent(FolderDragFormat))
+        {
+            var src = (FolderNode)e.Data.GetData(FolderDragFormat)!;
+            if (SamePath(src.FullPath, target.FullPath)) return null;                     // onto itself
+            if (SamePath(Path.GetDirectoryName(src.FullPath), target.FullPath)) return null;  // already there
+            if (IsUnder(target.FullPath, src.FullPath)) return null;                      // into its own subtree
+            return target;
+        }
+
+        return null;
+    }
+
+    private static bool SamePath(string? a, string? b) => string.Equals(
+        a?.TrimEnd(Path.DirectorySeparatorChar), b?.TrimEnd(Path.DirectorySeparatorChar),
+        StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsUnder(string path, string folder) =>
+        path.StartsWith(folder.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static DragDropEffects EffectFor(DragEventArgs e) =>
+        (e.KeyStates & DragDropKeyStates.ControlKey) != 0 ? DragDropEffects.Copy : DragDropEffects.Move;
+
+    private void FolderItem_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = DropTarget(sender, e) == null ? DragDropEffects.None : EffectFor(e);
+        e.Handled = true;   // innermost node wins; without this the drop lands on an ancestor too
+    }
+
+    private async void FolderItem_Drop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        var target = DropTarget(sender, e);
+        if (target == null) return;
+
+        var copy = EffectFor(e) == DragDropEffects.Copy;
+
+        if (e.Data.GetDataPresent(FilesDragFormat))
+        {
+            var files = (IList<MusicFile>)e.Data.GetData(FilesDragFormat)!;
+            if (copy) await CopyFiles(files, target.FullPath);
+            else await MoveFiles(files, target.FullPath);
+            return;
+        }
+
+        var src = (FolderNode)e.Data.GetData(FolderDragFormat)!;
+
+        // A mis-drop relocates a whole tree, so folder moves ask first (file drops don't: the
+        // grid reloads straight away and shows what happened).
+        if (!copy && MessageBox.Show($"Move '{src.Name}' into '{target.Name}'?", "Confirm Move",
+                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+        if (copy)
+        {
+            await CopyFolderWithDuplicateCheck(src.FullPath, target.FullPath);
+        }
+        else if (await ViewModel.FileOperations.MoveFolderAsync(src.FullPath, target.FullPath))
+        {
+            src.MarkAsDeleted();
+            if (ViewModel.CurrentFolderPath.StartsWith(src.FullPath, StringComparison.OrdinalIgnoreCase))
+                ViewModel.MusicFiles.Clear();
+        }
+        else
+        {
+            MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        target.IsExpanded = true;   // Refresh only reloads children of an open node
+        target.Refresh();
+    }
+
+    #endregion
+
+    #region Now Playing file actions
+
+    // Copy/Move/Delete acting on the *playing* file rather than the grid selection.
+    // Copy/Move drop the same recent-folders + Browse... list the grid's context menu uses.
+    private void NowPlayingCopy_Click(object sender, RoutedEventArgs e) =>
+        ShowNowPlayingDestinationMenu(sender, ViewModel.RecentFolders.CopyFolders, async (file, folder) =>
+        {
+            ViewModel.RecentFolders.AddCopyFolder(folder);
+            await CopyFiles(new[] { file }, folder);
+        });
+
+    private void NowPlayingMove_Click(object sender, RoutedEventArgs e) =>
+        ShowNowPlayingDestinationMenu(sender, ViewModel.RecentFolders.MoveFolders, async (file, folder) =>
+        {
+            ViewModel.RecentFolders.AddMoveFolder(folder);
+            await MoveFiles(new[] { file }, folder);
+        });
+
+    private async void NowPlayingDelete_Click(object sender, RoutedEventArgs e)
+    {
+        var file = ViewModel.NowPlaying;
+        if (file == null) return;
+
+        if (MessageBox.Show($"Are you sure you want to delete '{file.FileName}'?", "Confirm Delete",
+                MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+
+        // VM-level delete: releases the handle and continues with the next track in the queue.
+        await ViewModel.DeleteFileAsync(file.FullPath);
+    }
+
+    private void ShowNowPlayingDestinationMenu(object sender, List<string> recentFolders,
+        Func<MusicFile, string, System.Threading.Tasks.Task> action)
+    {
+        var file = ViewModel.NowPlaying;
+        if (file == null || sender is not Button button) return;
+
+        var menu = new ContextMenu { PlacementTarget = button, Placement = PlacementMode.Top };
+        foreach (var folder in recentFolders.Take(10).Where(Directory.Exists))
+        {
+            var item = new MenuItem { Header = folder };
+            item.Click += async (_, _) => await action(file, folder);
+            menu.Items.Add(item);
+        }
+        if (menu.Items.Count > 0) menu.Items.Add(new Separator());
+
+        var browse = new MenuItem { Header = "Browse..." };
+        browse.Click += async (_, _) =>
+        {
+            var folder = BrowseForFolder();
+            if (folder != null) await action(file, folder);
+        };
+        menu.Items.Add(browse);
+        menu.IsOpen = true;
     }
 
     #endregion

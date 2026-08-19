@@ -73,16 +73,16 @@ public sealed class DatabaseService
         cmd.ExecuteNonQuery();
     }
 
-    // Adds the playback-state columns to pre-existing DBs (CREATE TABLE IF NOT EXISTS
-    // won't alter a table that already exists). Each ALTER throws if the column is
-    // already there — ignore that.
+    // Adds later columns to pre-existing DBs (CREATE TABLE IF NOT EXISTS won't alter a
+    // table that already exists). Each ALTER throws if the column is already there — ignore that.
     private static void MigratePlaylistColumns(SqliteConnection conn)
     {
         foreach (var ddl in new[]
         {
             "ALTER TABLE playlists ADD COLUMN shuffle INTEGER NOT NULL DEFAULT 0;",
             "ALTER TABLE playlists ADD COLUMN repeat_mode INTEGER NOT NULL DEFAULT 0;",
-            "ALTER TABLE playlists ADD COLUMN last_full_path TEXT;"
+            "ALTER TABLE playlists ADD COLUMN last_full_path TEXT;",
+            "ALTER TABLE files ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0;"
         })
         {
             try { ExecRaw(conn, ddl); } catch { /* column already exists */ }
@@ -102,7 +102,8 @@ public sealed class DatabaseService
             cmd.CommandText = @"
                 SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
                        f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
-                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags
+                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags,
+                       f.play_count
                 FROM files f
                 WHERE f.folder_path = $folder AND f.is_deleted = 0;";
             cmd.Parameters.AddWithValue("$folder", folderPath);
@@ -131,7 +132,8 @@ public sealed class DatabaseService
             cmd.CommandText = @"
                 SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
                        f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
-                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags
+                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags,
+                       f.play_count
                 FROM files f
                 WHERE f.is_deleted = 0 AND f.full_path LIKE $prefix ESCAPE '|';";
             cmd.Parameters.AddWithValue("$prefix", prefix + "%");
@@ -314,6 +316,22 @@ public sealed class DatabaseService
     public void SetFileRating(string path, int? rating)
         => SetRating("files", path, rating);
 
+    /// <summary>Bumps a track's play counter. No-op if the file isn't cached yet
+    /// (the next scan inserts it at 0, which just makes it a preferred shuffle pick).</summary>
+    public void IncrementPlayCount(string path)
+    {
+        if (!IsReady || string.IsNullOrEmpty(path)) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE files SET play_count = play_count + 1 WHERE full_path = $p;";
+            cmd.Parameters.AddWithValue("$p", path);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
     public void SetFolderRating(string path, int? rating)
     {
         // Ensure a folder row exists so a rating can attach even before a scan caches it.
@@ -376,6 +394,199 @@ public sealed class DatabaseService
     {
         EnsureFolderRow(folderPath);
         ReplaceTags("folder", folderPath, csv);
+    }
+
+    /// <summary>Batch folder-tags lookup: one query (IN over paths) instead of one per folder.
+    /// Used by /browse. Untagged/missing folders are simply absent from the result.</summary>
+    public IReadOnlyDictionary<string, string> GetFolderTagsBatch(IReadOnlyList<string> paths)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!IsReady || paths.Count == 0) return result;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            var placeholders = new List<string>(paths.Count);
+            for (var i = 0; i < paths.Count; i++)
+            {
+                var name = $"$p{i}";
+                placeholders.Add(name);
+                cmd.Parameters.AddWithValue(name, paths[i]);
+            }
+            cmd.CommandText = $@"
+                SELECT fo.full_path, group_concat(t.name, ', ') AS tags
+                FROM folders fo
+                JOIN folder_tags l ON l.folder_id = fo.id
+                JOIN tags t ON t.id = l.tag_id
+                WHERE fo.full_path IN ({string.Join(",", placeholders)})
+                GROUP BY fo.full_path;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                result[r.GetString(0)] = r.IsDBNull(1) ? string.Empty : r.GetString(1);
+        }
+        catch { }
+        return result;
+    }
+
+    public IReadOnlyList<string> GetAllTagNames()
+    {
+        var list = new List<string>();
+        if (!IsReady) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT name FROM tags ORDER BY name COLLATE NOCASE;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(r.GetString(0));
+        }
+        catch { }
+        return list;
+    }
+
+    // -------------------------------------------------------- Tag management (folders)
+
+    /// <summary>Every tag in the shared vocabulary with how many non-deleted folders carry it
+    /// (LEFT JOIN, so a tag used only by files — 0 folders — still shows up, for cleanup).
+    /// Ordered by name.</summary>
+    public IReadOnlyList<(string Name, int FolderCount)> GetFolderTagUsage()
+    {
+        var list = new List<(string Name, int FolderCount)>();
+        if (!IsReady) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT t.name, COUNT(DISTINCT CASE WHEN fo.is_deleted = 0 THEN l.folder_id END) AS cnt
+                FROM tags t
+                LEFT JOIN folder_tags l ON l.tag_id = t.id
+                LEFT JOIN folders fo ON fo.id = l.folder_id
+                GROUP BY t.id
+                ORDER BY t.name COLLATE NOCASE;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add((r.GetString(0), r.IsDBNull(1) ? 0 : (int)r.GetInt64(1)));
+        }
+        catch { }
+        return list;
+    }
+
+    /// <summary>Removes a folder tag everywhere: every folder_tags link to it is deleted, and
+    /// the shared tags row itself is dropped too — unless a track (file_tags) still references
+    /// it, since files and folders share the same tag vocabulary. Returns how many (non-deleted)
+    /// folders were carrying the tag.</summary>
+    public int DeleteFolderTag(string tag)
+    {
+        if (!IsReady || string.IsNullOrWhiteSpace(tag)) return 0;
+        tag = tag.Trim();
+        try
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            long? tagId = ScalarId(conn, tx, "SELECT id FROM tags WHERE name = $n;", tag);
+            if (tagId == null) { tx.Rollback(); return 0; }
+
+            var affected = CountTaggedFolders(conn, tx, tagId.Value);
+
+            using (var delLinks = conn.CreateCommand())
+            {
+                delLinks.Transaction = tx;
+                delLinks.CommandText = "DELETE FROM folder_tags WHERE tag_id = $t;";
+                delLinks.Parameters.AddWithValue("$t", tagId.Value);
+                delLinks.ExecuteNonQuery();
+            }
+
+            DeleteTagRowIfUnused(conn, tx, tagId.Value);
+
+            tx.Commit();
+            return affected;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Every folder carrying <paramref name="from"/> gains <paramref name="to"/>
+    /// (created in the vocabulary if missing), then <paramref name="from"/>'s links are removed
+    /// and its row dropped under the same file_tags guard as <see cref="DeleteFolderTag"/>.
+    /// No-op (returns 0) if from/to are equal (OrdinalIgnoreCase) or either is blank. Returns
+    /// how many folders were carrying <paramref name="from"/>.</summary>
+    public int MergeFolderTag(string from, string to)
+    {
+        if (!IsReady || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(to)) return 0;
+        from = from.Trim();
+        to = to.Trim();
+        if (string.Equals(from, to, StringComparison.OrdinalIgnoreCase)) return 0;
+
+        try
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+
+            long? fromId = ScalarId(conn, tx, "SELECT id FROM tags WHERE name = $n;", from);
+            if (fromId == null) { tx.Rollback(); return 0; }
+
+            ExecParam(conn, tx, "INSERT OR IGNORE INTO tags (name) VALUES ($n);", ("$n", to));
+            long? toId = ScalarId(conn, tx, "SELECT id FROM tags WHERE name = $n;", to);
+            if (toId == null) { tx.Rollback(); return 0; }
+
+            var affected = CountTaggedFolders(conn, tx, fromId.Value);
+
+            using (var ins = conn.CreateCommand())
+            {
+                ins.Transaction = tx;
+                ins.CommandText = @"
+                    INSERT OR IGNORE INTO folder_tags (folder_id, tag_id)
+                    SELECT folder_id, $to FROM folder_tags WHERE tag_id = $from;";
+                ins.Parameters.AddWithValue("$to", toId.Value);
+                ins.Parameters.AddWithValue("$from", fromId.Value);
+                ins.ExecuteNonQuery();
+            }
+
+            using (var delLinks = conn.CreateCommand())
+            {
+                delLinks.Transaction = tx;
+                delLinks.CommandText = "DELETE FROM folder_tags WHERE tag_id = $t;";
+                delLinks.Parameters.AddWithValue("$t", fromId.Value);
+                delLinks.ExecuteNonQuery();
+            }
+
+            DeleteTagRowIfUnused(conn, tx, fromId.Value);
+
+            tx.Commit();
+            return affected;
+        }
+        catch { return 0; }
+    }
+
+    private static int CountTaggedFolders(SqliteConnection conn, SqliteTransaction tx, long tagId)
+    {
+        using var cnt = conn.CreateCommand();
+        cnt.Transaction = tx;
+        cnt.CommandText = @"
+            SELECT COUNT(DISTINCT l.folder_id) FROM folder_tags l
+            JOIN folders fo ON fo.id = l.folder_id
+            WHERE l.tag_id = $t AND fo.is_deleted = 0;";
+        cnt.Parameters.AddWithValue("$t", tagId);
+        return Convert.ToInt32(cnt.ExecuteScalar());
+    }
+
+    // Drops a tags row iff no file_tags link still references it (files and folders share the
+    // vocabulary table). Caller owns the transaction/commit.
+    private static void DeleteTagRowIfUnused(SqliteConnection conn, SqliteTransaction tx, long tagId)
+    {
+        using var check = conn.CreateCommand();
+        check.Transaction = tx;
+        check.CommandText = "SELECT 1 FROM file_tags WHERE tag_id = $t LIMIT 1;";
+        check.Parameters.AddWithValue("$t", tagId);
+        if (check.ExecuteScalar() != null) return; // still used by a track — keep the tag row
+
+        using var del = conn.CreateCommand();
+        del.Transaction = tx;
+        del.CommandText = "DELETE FROM tags WHERE id = $t;";
+        del.Parameters.AddWithValue("$t", tagId);
+        del.ExecuteNonQuery();
     }
 
     private void ReplaceTags(string kind, string path, string csv)
@@ -503,7 +714,8 @@ public sealed class DatabaseService
             cmd.CommandText = @"
                 SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
                        f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
-                       (SELECT group_concat(t2.name, ', ') FROM file_tags l2 JOIN tags t2 ON t2.id = l2.tag_id WHERE l2.file_id = f.id) AS tags
+                       (SELECT group_concat(t2.name, ', ') FROM file_tags l2 JOIN tags t2 ON t2.id = l2.tag_id WHERE l2.file_id = f.id) AS tags,
+                       f.play_count
                 FROM files f
                 JOIN file_tags l ON l.file_id = f.id
                 JOIN tags t ON t.id = l.tag_id
@@ -541,11 +753,12 @@ public sealed class DatabaseService
             }
             cmd.CommandText = $@"
                 SELECT full_path, file_name, title, artist, album, genre, year,
-                       duration_ticks, bitrate, sample_rate, file_size, file_modified_utc, rating, tags
+                       duration_ticks, bitrate, sample_rate, file_size, file_modified_utc, rating, tags, play_count
                 FROM (
                     SELECT f.full_path, f.file_name, f.title, f.artist, f.album, f.genre, f.year,
                            f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
                            (SELECT group_concat(t2.name, ', ') FROM file_tags l2 JOIN tags t2 ON t2.id = l2.tag_id WHERE l2.file_id = f.id) AS tags,
+                           f.play_count,
                            (f.file_name || ' ' || IFNULL(f.title,'') || ' ' || IFNULL(f.artist,'') || ' ' || IFNULL(f.album,'')) AS hay
                     FROM files f
                     WHERE f.is_deleted = 0
@@ -581,6 +794,41 @@ public sealed class DatabaseService
             using var r = cmd.ExecuteReader();
             while (r.Read())
                 list.Add(ReadFolderRow(r));
+        }
+        catch { }
+        return list;
+    }
+
+    /// <summary>Distinct folder paths (non-deleted) tagged with ANY of the given tag names.
+    /// The folder tree's tag filter is DB-driven — a tagged folder can be anywhere in the
+    /// library, not just under a currently-loaded/expanded tree node — so the match set has
+    /// to come from here rather than walking in-memory FolderNodes.</summary>
+    public IReadOnlyList<string> SearchFolderPathsByTags(IReadOnlyList<string> tags, int limit = 500)
+    {
+        var list = new List<string>();
+        if (!IsReady || tags == null || tags.Count == 0) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            var placeholders = new List<string>(tags.Count);
+            for (var i = 0; i < tags.Count; i++)
+            {
+                var name = $"$t{i}";
+                placeholders.Add(name);
+                cmd.Parameters.AddWithValue(name, tags[i]);
+            }
+            cmd.CommandText = $@"
+                SELECT DISTINCT fo.full_path
+                FROM folders fo
+                JOIN folder_tags l ON l.folder_id = fo.id
+                JOIN tags t ON t.id = l.tag_id
+                WHERE fo.is_deleted = 0 AND t.name COLLATE NOCASE IN ({string.Join(",", placeholders)})
+                LIMIT $lim;";
+            cmd.Parameters.AddWithValue("$lim", limit);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(r.GetString(0));
         }
         catch { }
         return list;
@@ -708,7 +956,8 @@ public sealed class DatabaseService
                 SELECT pe.id, pe.full_path,
                        f.file_name, f.title, f.artist, f.album, f.genre, f.year,
                        f.duration_ticks, f.bitrate, f.sample_rate, f.file_size, f.file_modified_utc, f.rating,
-                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags
+                       (SELECT group_concat(t.name, ', ') FROM file_tags l JOIN tags t ON t.id = l.tag_id WHERE l.file_id = f.id) AS tags,
+                       f.play_count
                 FROM playlist_entries pe
                 LEFT JOIN files f ON f.full_path = pe.full_path AND f.is_deleted = 0
                 WHERE pe.playlist_id = $id
@@ -734,7 +983,8 @@ public sealed class DatabaseService
                     FileSize = r.IsDBNull(11) ? 0 : r.GetInt64(11),
                     FileModifiedUtc = ParseTime(r.IsDBNull(12) ? null : r.GetString(12)),
                     Rating = r.IsDBNull(13) ? null : r.GetInt32(13),
-                    Tags = r.IsDBNull(14) ? string.Empty : r.GetString(14)
+                    Tags = r.IsDBNull(14) ? string.Empty : r.GetString(14),
+                    PlayCount = r.IsDBNull(15) ? 0 : r.GetInt32(15)
                 };
                 list.Add(mf);
             }
@@ -845,6 +1095,100 @@ public sealed class DatabaseService
         catch { }
     }
 
+    // ---------------------------------------------------------------- Lyrics
+
+    public LyricsRecord? GetLyrics(string fullPath)
+    {
+        if (!IsReady) return null;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT full_path, plain, lrc, source, synced, updated_utc
+                FROM lyrics WHERE full_path = $p;";
+            cmd.Parameters.AddWithValue("$p", fullPath);
+            using var r = cmd.ExecuteReader();
+            return r.Read() ? ReadLyricsRow(r) : null;
+        }
+        catch { return null; }
+    }
+
+    public void SaveLyrics(string fullPath, string? plain, string? lrc, string source)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO lyrics (full_path, plain, lrc, source, synced, updated_utc)
+                VALUES ($full, $plain, $lrc, $source, $synced, $updated)
+                ON CONFLICT(full_path) DO UPDATE SET
+                    plain=excluded.plain, lrc=excluded.lrc, source=excluded.source,
+                    synced=excluded.synced, updated_utc=excluded.updated_utc;";
+            cmd.Parameters.AddWithValue("$full", fullPath);
+            cmd.Parameters.AddWithValue("$plain", (object?)plain ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$lrc", (object?)lrc ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$source", source);
+            cmd.Parameters.AddWithValue("$synced", !string.IsNullOrWhiteSpace(lrc) ? 1 : 0);
+            cmd.Parameters.AddWithValue("$updated", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public void DeleteLyrics(string fullPath)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM lyrics WHERE full_path = $p;";
+            cmd.Parameters.AddWithValue("$p", fullPath);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    /// <summary>Full paths under <paramref name="folderPath"/> (recursively — matches both a
+    /// plain folder view and the recursive "play folder tree" queue) that have a non-empty
+    /// lyrics row. The lyrics table only ever holds tracks the user fetched/synced, so it stays
+    /// small — read it in full and filter in-process rather than a LIKE-prefix query.</summary>
+    public HashSet<string> GetPathsWithLyrics(string folderPath)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!IsReady || string.IsNullOrEmpty(folderPath)) return set;
+        try
+        {
+            var prefix = folderPath.TrimEnd('\\') + "\\";
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT full_path FROM lyrics
+                WHERE (plain IS NOT NULL AND plain != '') OR (lrc IS NOT NULL AND lrc != '');";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var path = r.GetString(0);
+                if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) set.Add(path);
+            }
+        }
+        catch { }
+        return set;
+    }
+
+    private static LyricsRecord ReadLyricsRow(SqliteDataReader r) => new()
+    {
+        FullPath = r.GetString(0),
+        Plain = r.IsDBNull(1) ? null : r.GetString(1),
+        Lrc = r.IsDBNull(2) ? null : r.GetString(2),
+        Source = r.IsDBNull(3) ? string.Empty : r.GetString(3),
+        Synced = !r.IsDBNull(4) && r.GetInt64(4) != 0,
+        UpdatedUtc = r.IsDBNull(5) ? null : ParseTime(r.GetString(5))
+    };
+
     // --------------------------------------------------------------- Helpers
 
     private static (string table, string linkTable, string idCol) TagTables(string kind)
@@ -887,7 +1231,8 @@ public sealed class DatabaseService
         FileSize = r.IsDBNull(10) ? 0 : r.GetInt64(10),
         FileModifiedUtc = ParseTime(r.IsDBNull(11) ? null : r.GetString(11)),
         Rating = r.IsDBNull(12) ? null : r.GetInt32(12),
-        Tags = r.IsDBNull(13) ? string.Empty : r.GetString(13)
+        Tags = r.IsDBNull(13) ? string.Empty : r.GetString(13),
+        PlayCount = r.IsDBNull(14) ? 0 : r.GetInt32(14)
     };
 
     private static FolderRecord ReadFolderRow(SqliteDataReader r) => new()
@@ -938,6 +1283,7 @@ public sealed class DatabaseService
             file_size     INTEGER,
             file_modified_utc TEXT,
             rating        INTEGER,
+            play_count    INTEGER NOT NULL DEFAULT 0,
             is_deleted    INTEGER NOT NULL DEFAULT 0,
             last_scanned_utc TEXT
         );
@@ -971,6 +1317,14 @@ public sealed class DatabaseService
             full_path   TEXT NOT NULL,
             position    INTEGER NOT NULL,
             added_utc   TEXT
+        );
+        CREATE TABLE IF NOT EXISTS lyrics (
+            full_path   TEXT PRIMARY KEY,
+            plain       TEXT,
+            lrc         TEXT,
+            source      TEXT,
+            synced      INTEGER NOT NULL DEFAULT 0,
+            updated_utc TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_files_folder    ON files(folder_path);
         CREATE INDEX IF NOT EXISTS ix_folders_parent  ON folders(parent_path);

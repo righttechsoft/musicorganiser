@@ -27,6 +27,16 @@ class ApiClient {
         .toList();
   }
 
+  // Recursive file listing under [path] (band-preview player). Server defaults the cap to 200
+  // when recursive and no explicit limit is given.
+  Future<List<BandFile>> filesRecursive(String path, {int? limit}) async {
+    final q = {'path': path, 'recursive': '1', if (limit != null) 'limit': '$limit'};
+    final r = await http.get(_u('/files', q)).timeout(const Duration(seconds: 15));
+    return (jsonDecode(r.body) as List)
+        .map((e) => BandFile.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
   // Global library search: matches title/artist/album/filename across every folder.
   Future<List<TrackFile>> search(String query, {int limit = 300}) async {
     final r = await http
@@ -42,6 +52,11 @@ class ApiClient {
     final q = {'path': path, if (open) 'open': '1'};
     final r = await http.get(_u('/browse', q)).timeout(const Duration(seconds: 8));
     return BrowseResult.fromJson(jsonDecode(r.body) as Map<String, dynamic>);
+  }
+
+  Future<LyricsData> lyrics(String path) async {
+    final r = await http.get(_u('/file/lyrics', {'path': path})).timeout(const Duration(seconds: 8));
+    return LyricsData.fromJson(jsonDecode(r.body) as Map<String, dynamic>);
   }
 
   Future<List<HistoryItem>> history() async {
@@ -95,6 +110,42 @@ class ApiClient {
   Future<void> setTags(String path, String tags) =>
       _post('/file/tags', {'path': path, 'tags': tags});
 
+  // ---- folder tags ----
+  Future<String> folderTags(String path) async {
+    final r = await http.get(_u('/folder/tags', {'path': path})).timeout(const Duration(seconds: 6));
+    final j = jsonDecode(r.body);
+    return (j is Map && j['tags'] is String) ? j['tags'] as String : '';
+  }
+
+  Future<void> setFolderTags(String path, String tags) =>
+      _post('/folder/tags', {'path': path, 'tags': tags});
+
+  Future<FolderTagSuggestion> suggestFolderTags(String path) async {
+    final r = await _post('/folder/tags/suggest', {'path': path}).timeout(const Duration(seconds: 25));
+    return FolderTagSuggestion.fromJson(jsonDecode(r.body) as Map<String, dynamic>);
+  }
+
+  // ---- tag management (delete / merge the shared folder-tag vocabulary) ----
+  Future<List<TagUsage>> tags() async {
+    final r = await http.get(_u('/tags')).timeout(const Duration(seconds: 8));
+    return (jsonDecode(r.body) as List)
+        .map((e) => TagUsage.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<void> deleteTag(String tag) => _post('/tags/delete', {'tag': tag});
+  Future<void> mergeTag(String from, String to) => _post('/tags/merge', {'from': from, 'to': to});
+
+  Future<void> setLyrics(String path, {String? plain, String? lrc}) => _post('/file/lyrics', {
+        'path': path,
+        'plain': ?plain,
+        'lrc': ?lrc,
+      });
+  Future<void> findLyrics(String path) => _post('/file/lyrics/find', {'path': path});
+  Future<void> clearLyrics(String path) => _post('/file/lyrics/clear', {'path': path});
+
+  Future<bool> copyFile(String path, String dest) =>
+      _postOk('/file/copy', {'path': path, 'destFolder': dest});
   Future<bool> moveFile(String path, String dest) =>
       _postOk('/file/move', {'path': path, 'destFolder': dest});
   Future<bool> deleteFile(String path) => _postOk('/file/delete', {'path': path});

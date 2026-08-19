@@ -23,6 +23,7 @@ class _NowPlayingViewState extends State<NowPlayingView> {
   double? _sysVolDrag; // non-null while dragging the system-volume bar
   List<AudioDevice> _devices = [];
   bool _outputExpanded = false; // collapse device + system volume + quality by default
+  bool _showLyrics = false; // karaoke mode: swaps the art region for the lyrics panel
 
   AppState get app => widget.app;
 
@@ -114,7 +115,7 @@ class _NowPlayingViewState extends State<NowPlayingView> {
                           Flexible(
                             child: Padding(
                               padding: const EdgeInsets.symmetric(vertical: 10),
-                              child: _art(np),
+                              child: _showLyrics ? _lyricsPanel(np) : _art(np),
                             ),
                           ),
                           ..._meta(np, s),
@@ -129,6 +130,7 @@ class _NowPlayingViewState extends State<NowPlayingView> {
   }
 
   Widget _header(BuildContext context) {
+    final np = app.status.nowPlaying;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
       child: Row(
@@ -138,6 +140,15 @@ class _NowPlayingViewState extends State<NowPlayingView> {
           else
             const SizedBox(width: 8),
           Expanded(child: Center(child: Text('NOW PLAYING', style: AppText.sectionLabel))),
+          if (np != null)
+            IconButton(
+              onPressed: () => setState(() => _showLyrics = !_showLyrics),
+              tooltip: _showLyrics ? 'Show album art' : 'Show lyrics',
+              icon: Icon(Icons.lyrics_outlined,
+                  color: _showLyrics
+                      ? AppColors.accent
+                      : (np.hasLyrics ? AppColors.text : AppColors.muted)),
+            ),
           IconButton(
             onPressed: () async {
               final np = app.status.nowPlaying;
@@ -170,6 +181,62 @@ class _NowPlayingViewState extends State<NowPlayingView> {
         child: _CyclingArt(api: app.api!, path: np.path, artCount: np.artCount),
       ),
     );
+  }
+
+  Widget _lyricsPanel(NowPlaying np) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 4, 4),
+            child: Row(
+              children: [
+                Expanded(child: Text('LYRICS', style: AppText.sectionLabel)),
+                // Wipes the cached lyrics so the user can re-fetch or paste fresh — mirrors the
+                // desktop's Clear button, which is only shown once there's something to clear.
+                if (app.lyrics?.hasAny ?? false)
+                  IconButton(
+                    iconSize: 18,
+                    tooltip: 'Clear lyrics',
+                    icon: const Icon(Icons.delete_outline, color: AppColors.muted),
+                    onPressed: () => app.clearLyrics(np.path),
+                  ),
+                IconButton(
+                  iconSize: 18,
+                  tooltip: 'Edit lyrics',
+                  icon: const Icon(Icons.edit_outlined, color: AppColors.muted),
+                  onPressed: () => _editLyrics(np.path),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: AppColors.line),
+          Expanded(child: _KaraokeView(app: app, path: np.path)),
+        ],
+      ),
+    );
+  }
+
+  // Plain-lyrics text editor, mirroring showTagEditor's bottom-sheet shape.
+  // ponytail: edits plain lyrics only — raw LRC line-timing edit stays desktop-only.
+  Future<void> _editLyrics(String path) async {
+    final text = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: _LyricsEditor(initial: app.lyrics?.plain ?? ''),
+      ),
+    );
+    if (text != null) await app.saveLyrics(path, plain: text);
   }
 
   List<Widget> _meta(NowPlaying np, PlayerStatus s) {
@@ -524,6 +591,171 @@ class _CyclingArtState extends State<_CyclingArt> {
         big: true,
         radius: 16,
         expand: true,
+      ),
+    );
+  }
+}
+
+/// Karaoke lyrics view: highlights + auto-scrolls the current line from
+/// `app.status.positionSec`. Falls back to plain, unhighlighted text when only
+/// `plain` lyrics are cached (no synced .lrc yet), and to a "Find lyrics" prompt
+/// when nothing is cached.
+class _KaraokeView extends StatefulWidget {
+  final AppState app;
+  final String path;
+  const _KaraokeView({required this.app, required this.path});
+
+  @override
+  State<_KaraokeView> createState() => _KaraokeViewState();
+}
+
+class _KaraokeViewState extends State<_KaraokeView> {
+  final _scroll = ScrollController();
+  int _lastScrolledIndex = -1;
+
+  @override
+  void didUpdateWidget(covariant _KaraokeView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.path != widget.path) _lastScrolledIndex = -1;
+  }
+
+  // Rough average row height — exact heights vary with wrapped lines, but this is
+  // close enough to keep the active line comfortably in view.
+  void _scrollToActive(int index) {
+    if (index < 0 || index == _lastScrolledIndex || !_scroll.hasClients) return;
+    _lastScrolledIndex = index;
+    final target = (index * 40.0 - 120).clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.animateTo(target, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = widget.app;
+    if (app.loadingLyrics) {
+      return const Center(child: CircularProgressIndicator(color: AppColors.accent));
+    }
+    final data = app.lyrics;
+    if (data == null || !data.hasAny) return _findPrompt();
+
+    final lines = data.lines;
+    if (lines.isEmpty) {
+      // Plain lyrics only — no sync yet, nothing to highlight/scroll.
+      return SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Text(data.plain ?? '', style: AppText.trackTitle.copyWith(height: 1.6)),
+      );
+    }
+
+    final active = app.activeLyricLineIndex;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToActive(active));
+    return ListView.builder(
+      controller: _scroll,
+      padding: const EdgeInsets.symmetric(vertical: 60, horizontal: 20),
+      itemCount: lines.length,
+      itemBuilder: (context, i) {
+        final isActive = i == active;
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Text(
+            lines[i].text,
+            textAlign: TextAlign.center,
+            style: isActive
+                ? AppText.screenTitle.copyWith(fontSize: 18, color: AppColors.accent)
+                : AppText.trackTitle.copyWith(color: AppColors.muted),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _findPrompt() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.lyrics_outlined, size: 40, color: AppColors.muted),
+          const SizedBox(height: 10),
+          Text('No lyrics yet', style: AppText.sub),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: () => widget.app.findLyrics(widget.path),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.accent),
+            icon: const Icon(Icons.search, size: 18),
+            label: const Text('Find lyrics'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Bottom-sheet plain-lyrics editor. Returns the edited text, or null on cancel.
+class _LyricsEditor extends StatefulWidget {
+  final String initial;
+  const _LyricsEditor({required this.initial});
+  @override
+  State<_LyricsEditor> createState() => _LyricsEditorState();
+}
+
+class _LyricsEditorState extends State<_LyricsEditor> {
+  late final _ctrl = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            sectionLabel('Edit lyrics'),
+            TextField(
+              controller: _ctrl,
+              maxLines: 10,
+              minLines: 6,
+              style: AppText.trackTitle.copyWith(fontWeight: FontWeight.w500),
+              decoration: InputDecoration(
+                hintText: 'Paste or type lyrics…',
+                filled: true,
+                fillColor: AppColors.bg,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.line)),
+                      child: Text('Cancel', style: TextStyle(color: AppColors.text))),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(context, _ctrl.text),
+                    style: FilledButton.styleFrom(backgroundColor: AppColors.accent),
+                    child: const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

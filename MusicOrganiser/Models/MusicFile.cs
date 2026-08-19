@@ -25,12 +25,25 @@ public class MusicFile : INotifyPropertyChanged
         set => Set(ref _rating, value);
     }
 
+    // How many times this track has been played (persisted). Drives least-played shuffle.
+    public int PlayCount { get; set; }
+
     // Comma-separated tags, bound to the grid Tags column.
     private string _tags = string.Empty;
     public string Tags
     {
         get => _tags;
         set => Set(ref _tags, value ?? string.Empty);
+    }
+
+    // Whether the lyrics table has a (non-empty) row for this track. Bound to the grid's
+    // mic-icon column; flipped on load (one batch query per folder, see
+    // DatabaseService.GetPathsWithLyrics) and immediately on a successful lyrics save.
+    private bool _hasLyrics;
+    public bool HasLyrics
+    {
+        get => _hasLyrics;
+        set => Set(ref _hasLyrics, value);
     }
 
     // Change-detection fields used by the SQLite cache (kept off the grid).

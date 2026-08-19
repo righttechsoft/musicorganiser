@@ -125,6 +125,14 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
               }
               if (mounted) Navigator.pop(context);
             }),
+          _tile(Icons.content_copy_outlined, 'Copy to…', AppColors.text, () async {
+            final dest = await showMovePicker(context, api: widget.api, movingLabel: t.name, verb: 'Copy');
+            if (dest != null) {
+              final ok = await widget.api.copyFile(t.path, dest);
+              if (mounted) _toast(context, ok ? 'Copied' : 'Copy failed');
+            }
+            if (mounted) Navigator.pop(context);
+          }),
           _tile(Icons.drive_file_move_outline, 'Move to…', AppColors.text, () async {
             final dest = await showMovePicker(context, api: widget.api, movingLabel: t.name);
             if (dest != null) {
@@ -324,17 +332,20 @@ class _TagEditorState extends State<_TagEditor> {
   }
 }
 
-/// Folder picker for move operations. Returns the chosen destination path, or null.
-Future<String?> showMovePicker(BuildContext context, {required ApiClient api, required String movingLabel}) {
+/// Folder picker for move (or copy, via [verb]) operations. Returns the chosen destination path, or null.
+Future<String?> showMovePicker(BuildContext context,
+    {required ApiClient api, required String movingLabel, String verb = 'Move'}) {
   return Navigator.of(context).push<String>(
-    MaterialPageRoute(builder: (_) => _MovePicker(api: api, movingLabel: movingLabel), fullscreenDialog: true),
+    MaterialPageRoute(
+        builder: (_) => _MovePicker(api: api, movingLabel: movingLabel, verb: verb), fullscreenDialog: true),
   );
 }
 
 class _MovePicker extends StatefulWidget {
   final ApiClient api;
   final String movingLabel;
-  const _MovePicker({required this.api, required this.movingLabel});
+  final String verb;
+  const _MovePicker({required this.api, required this.movingLabel, required this.verb});
   @override
   State<_MovePicker> createState() => _MovePickerState();
 }
@@ -385,9 +396,10 @@ class _MovePickerState extends State<_MovePicker> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Row(children: [
-              const Icon(Icons.drive_file_move_outline, size: 16, color: AppColors.muted),
+              Icon(widget.verb == 'Copy' ? Icons.content_copy_outlined : Icons.drive_file_move_outline,
+                  size: 16, color: AppColors.muted),
               const SizedBox(width: 6),
-              Text('MOVE TO…', style: AppText.sectionLabel),
+              Text('${widget.verb.toUpperCase()} TO…', style: AppText.sectionLabel),
             ]),
             Text(widget.movingLabel,
                 maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.trackTitle.copyWith(fontSize: 14)),
@@ -449,7 +461,7 @@ class _MovePickerState extends State<_MovePicker> {
                       style: FilledButton.styleFrom(
                           backgroundColor: AppColors.accent, padding: const EdgeInsets.symmetric(vertical: 14)),
                       icon: const Icon(Icons.check, size: 18),
-                      label: const Text('Move here'),
+                      label: Text('${widget.verb} here'),
                     ),
                   ),
                 ],
