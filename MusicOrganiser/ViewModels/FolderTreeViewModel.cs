@@ -101,6 +101,7 @@ public class FolderNode : ViewModelBase
     private readonly bool _isDummy;
     private string _filterText = string.Empty;
     private TagMatchSet? _matchSet;
+    private TagMatchSet? _ratingMatchSet;
     private FolderSortOption _sortOption = FolderSortOption.NameAsc;
     private bool _isDeleted;
 
@@ -205,6 +206,26 @@ public class FolderNode : ViewModelBase
         }
     }
 
+    // DB-driven rating-filter match set (ANY selected star value matches, 0 = "any rating"),
+    // propagated down the tree exactly like MatchSet — see FolderTreeViewModel.SelectedRatings.
+    public TagMatchSet? RatingMatchSet
+    {
+        get => _ratingMatchSet;
+        set
+        {
+            if (!ReferenceEquals(_ratingMatchSet, value))
+            {
+                _ratingMatchSet = value;
+                foreach (var child in Children)
+                {
+                    child.RatingMatchSet = value;
+                }
+                OnPropertyChanged(nameof(RatingMatchSet));
+                OnPropertyChanged(nameof(IsVisible));
+            }
+        }
+    }
+
     public FolderSortOption SortOption
     {
         get => _sortOption;
@@ -233,21 +254,23 @@ public class FolderNode : ViewModelBase
         get
         {
             var tagActive = _matchSet != null && _matchSet.Matches.Count > 0;
+            var ratingActive = _ratingMatchSet != null && _ratingMatchSet.Matches.Count > 0;
 
-            if (_isDummy) return string.IsNullOrWhiteSpace(_filterText) && !tagActive;
+            if (_isDummy) return string.IsNullOrWhiteSpace(_filterText) && !tagActive && !ratingActive;
 
             var nameMatches = string.IsNullOrWhiteSpace(_filterText)
                 || Name.Contains(_filterText, StringComparison.OrdinalIgnoreCase)
                 // If a parent folder matched the name filter, show its whole subtree unfiltered.
                 || AncestorMatches();
 
-            if (!tagActive)
+            if (!tagActive && !ratingActive)
                 return nameMatches || Children.Any(c => c.IsVisible);
 
             var norm = TagMatchSet.Normalize(FullPath);
-            var tagMatches = _matchSet!.Matches.Contains(norm) || _matchSet.Ancestors.Contains(norm);
+            var tagMatches = !tagActive || _matchSet!.Matches.Contains(norm) || _matchSet.Ancestors.Contains(norm);
+            var ratingMatches = !ratingActive || _ratingMatchSet!.Matches.Contains(norm) || _ratingMatchSet.Ancestors.Contains(norm);
 
-            if (nameMatches && tagMatches)
+            if (nameMatches && tagMatches && ratingMatches)
                 return true;
 
             return Children.Any(c => c.IsVisible);
@@ -388,6 +411,7 @@ public class FolderNode : ViewModelBase
             Parent = this,
             FilterText = _filterText,
             MatchSet = _matchSet,
+            RatingMatchSet = _ratingMatchSet,
             SortOption = _sortOption
         };
         if (record != null)
@@ -562,6 +586,8 @@ public class FolderTreeViewModel : ViewModelBase
     private string _filterText = string.Empty;
     private IReadOnlyList<string> _selectedTags = Array.Empty<string>();
     private CancellationTokenSource? _tagFilterCts;
+    private IReadOnlyList<int> _selectedRatings = Array.Empty<int>();
+    private CancellationTokenSource? _ratingFilterCts;
     private FolderSortOptionItem _selectedSortOption;
 
     public ObservableCollection<FolderNode> RootNodes { get; } = new();
@@ -684,6 +710,60 @@ public class FolderTreeViewModel : ViewModelBase
             // matches — the DB query itself can return up to its own (higher) limit, but
             // actually expanding that many ancestor chains is real disk/DB work per match.
             // Raise this only if a real library has more than 200 folders under one filter.
+            foreach (var path in paths.Take(200))
+            {
+                if (token.IsCancellationRequested) return;
+                await EnsurePathMaterializedAsync(path);
+            }
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested) IsBusy = false;
+        }
+    }
+
+    // Selected rating filter (ANY selected value matches, 0 = "any rating"). DB-driven for the
+    // same reason as SelectedTags — a matching folder can be anywhere in the library.
+    public IReadOnlyList<int> SelectedRatings
+    {
+        get => _selectedRatings;
+        set
+        {
+            value ??= Array.Empty<int>();
+            if (!_selectedRatings.SequenceEqual(value))
+            {
+                _selectedRatings = value;
+                OnPropertyChanged(nameof(SelectedRatings));
+                _ = ApplyRatingFilterAsync(value);
+            }
+        }
+    }
+
+    private async Task ApplyRatingFilterAsync(IReadOnlyList<int> ratings)
+    {
+        _ratingFilterCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _ratingFilterCts = cts;
+        var token = cts.Token;
+
+        IsBusy = true;
+        try
+        {
+            if (ratings.Count == 0)
+            {
+                foreach (var node in RootNodes) node.RatingMatchSet = null;
+                return;
+            }
+
+            IReadOnlyList<string> paths;
+            try { paths = await Task.Run(() => DatabaseService.Instance.SearchFolderPathsByRating(ratings), token); }
+            catch (OperationCanceledException) { return; }
+            if (token.IsCancellationRequested) return;
+
+            var matchSet = new TagMatchSet(paths);
+            foreach (var node in RootNodes) node.RatingMatchSet = matchSet;
+
+            // Same 200-match materialization cap as the tag filter — see ApplyTagFilterAsync.
             foreach (var path in paths.Take(200))
             {
                 if (token.IsCancellationRequested) return;

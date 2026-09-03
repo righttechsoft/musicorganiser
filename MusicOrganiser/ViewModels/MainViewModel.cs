@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -84,6 +85,66 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ObservableCollection<RecentPlayedFolderItem> RecentPlayedFolders { get; } = new();
     public ObservableCollection<MusicFile> MusicFiles { get; } = new();
     public ObservableCollection<Playlist> Playlists { get; } = new();
+
+    // Grid text/rating filter — a display-only CollectionView over MusicFiles. MusicFiles
+    // itself stays the full playback queue (see MoveEntry/GetAdjacent, which index/iterate it
+    // directly), so filtering must never remove items from it — only hide them in the grid.
+    private readonly ICollectionView _musicFilesView;
+    public ICollectionView MusicFilesView => _musicFilesView;
+
+    private string _fileFilterText = string.Empty;
+    public string FileFilterText
+    {
+        get => _fileFilterText;
+        set
+        {
+            if (SetProperty(ref _fileFilterText, value))
+                _musicFilesView.Refresh();
+        }
+    }
+
+    // Selected star-rating filter for the grid, 0 = "any rating" (rated at all), 1-5 = exact
+    // value; multi-select, OR'd together. Purely in-memory — MusicFiles is already loaded.
+    private readonly HashSet<int> _selectedFileRatings = new();
+    public IReadOnlyCollection<int> SelectedFileRatings => _selectedFileRatings;
+
+    public void ToggleFileRatingFilter(int value)
+    {
+        if (!_selectedFileRatings.Remove(value)) _selectedFileRatings.Add(value);
+        OnPropertyChanged(nameof(SelectedFileRatings));
+        _musicFilesView.Refresh();
+    }
+
+    public void ClearFileRatingFilter()
+    {
+        if (_selectedFileRatings.Count == 0) return;
+        _selectedFileRatings.Clear();
+        OnPropertyChanged(nameof(SelectedFileRatings));
+        _musicFilesView.Refresh();
+    }
+
+    private bool FilterMusicFile(object obj)
+    {
+        if (obj is not MusicFile f) return false;
+
+        if (!string.IsNullOrWhiteSpace(_fileFilterText))
+        {
+            var t = _fileFilterText;
+            var textMatch = f.FileName.Contains(t, StringComparison.OrdinalIgnoreCase)
+                || f.Title.Contains(t, StringComparison.OrdinalIgnoreCase)
+                || f.Artist.Contains(t, StringComparison.OrdinalIgnoreCase)
+                || f.Album.Contains(t, StringComparison.OrdinalIgnoreCase);
+            if (!textMatch) return false;
+        }
+
+        if (_selectedFileRatings.Count > 0)
+        {
+            if (!f.Rating.HasValue) return false;
+            if (!_selectedFileRatings.Contains(0) && !_selectedFileRatings.Contains(f.Rating.Value)) return false;
+        }
+
+        return true;
+    }
 
     // Playlist view state. MusicFiles doubles as the playback queue; when a playlist is
     // loaded it holds the playlist's tracks, otherwise the selected folder's files.
@@ -557,6 +618,9 @@ public class MainViewModel : ViewModelBase, IDisposable
         // folder loading kicks off.
         DatabaseService.Instance.Initialize();
         LibraryCacheService.Instance.Start();
+
+        _musicFilesView = CollectionViewSource.GetDefaultView(MusicFiles);
+        _musicFilesView.Filter = FilterMusicFile;
 
         _metadataService = new MusicMetadataService();
         _audioPlayer = new AudioPlayerService();
@@ -1034,6 +1098,10 @@ public class MainViewModel : ViewModelBase, IDisposable
         {
             _audioPlayer.Play(file.FullPath);
             NowPlaying = file;
+            // The grid follows the music: whatever started the track (double-click, Next,
+            // auto-advance, shuffle, the phone remote), its row becomes the selection so the
+            // view can centre it — see MainWindow's NowPlaying handler.
+            SelectedFile = file;
             TotalDuration = _audioPlayer.TotalDuration;
             IsPlaying = true;
 
@@ -1634,23 +1702,33 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
-    /// <summary>Deletes a file and keeps the music going: if it is the *playing* track, the queue's
-    /// next track takes over instead of playback dying with the file. Every delete entry point
-    /// (grid context menu, now-playing button, mobile API) routes through here, so the behaviour is
-    /// uniform — <see cref="AudioPlayerService.StopAndReleaseFile"/> detaches PlaybackStopped before
-    /// stopping, so the normal auto-advance never fires for a deleted track.</summary>
-    public async Task<bool> DeleteFileAsync(string path)
+    /// <summary>Deletes a file, continuing with the queue's next track if it was the playing one.</summary>
+    public Task<bool> DeleteFileAsync(string path) =>
+        LeaveQueueAsync(path, () => FileOperations.DeleteFileAsync(path));
+
+    /// <summary>Moves a file to another folder. Same deal as delete: the track leaves this queue, so
+    /// the next one takes over rather than the music stopping with it.</summary>
+    public Task<bool> MoveFileAsync(string path, string destFolder) =>
+        LeaveQueueAsync(path, () => FileOperations.MoveFileAsync(path, destFolder), destFolder);
+
+    /// <summary>Runs a file operation that takes <paramref name="path"/> out of the current queue
+    /// (delete or move) and keeps the music going: if it is the *playing* track, the queue's next
+    /// track takes over instead of playback dying with the file. Every entry point (grid context
+    /// menu, now-playing buttons, drag &amp; drop, mobile API) routes through here, so they all
+    /// behave the same — <see cref="AudioPlayerService.StopAndReleaseFile"/> detaches PlaybackStopped
+    /// before stopping, so the normal auto-advance never fires for a moved or deleted track.</summary>
+    private async Task<bool> LeaveQueueAsync(string path, Func<Task<bool>> operation, string? destFolder = null)
     {
         var wasPlaying = NowPlaying != null &&
                          string.Equals(NowPlaying.FullPath, path, StringComparison.OrdinalIgnoreCase);
 
-        // Pick the successor BEFORE the delete: afterwards the track is out of the queue and
+        // Pick the successor BEFORE the operation: afterwards the track is out of the queue and
         // GetAdjacent has nothing to step from. Same wrap rule as Next()/auto-advance.
         var next = wasPlaying ? GetAdjacent(NowPlaying!, +1, _repeat == RepeatMode.All) : null;
         if (next != null && string.Equals(next.FullPath, path, StringComparison.OrdinalIgnoreCase))
-            next = null;    // single-track queue wrapping onto the file we just deleted
+            next = null;    // single-track queue wrapping onto the file we just removed
 
-        if (!await FileOperations.DeleteFileAsync(path)) return false;
+        if (!await operation()) return false;
 
         // Drop the row in place rather than reloading the folder: a reload rebuilds the queue
         // (and wipes a playlist / recursive-tree queue) out from under the track about to play.
@@ -1659,12 +1737,13 @@ public class MainViewModel : ViewModelBase, IDisposable
         if (row != null)
         {
             MusicFiles.Remove(row);
-            _shuffleHistory.Remove(row);      // Previous must not walk back into a deleted file
+            _shuffleHistory.Remove(row);      // Previous must not walk back into a file that's gone
             _shufflePlayed.Remove(path);
         }
 
-        // Let the cache notice it is gone (the folder rescan marks vanished files deleted).
+        // Let the cache notice the move/delete (the folder rescan reconciles both ends).
         LibraryCacheService.Instance.Enqueue(Path.GetDirectoryName(path) ?? string.Empty);
+        if (destFolder != null) LibraryCacheService.Instance.Enqueue(destFolder);
 
         if (wasPlaying)
         {

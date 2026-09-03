@@ -76,7 +76,7 @@ A companion Flutter app (`remote_app/`) controls the desktop over your local net
 - Recent folders menu (last 10 destinations for Copy and Move separately)
 - Confirmation dialog for delete operations
 - Automatically stops playback before moving/deleting playing files
-- Deleting the track you're listening to doesn't stop the music — playback continues with the next track in the queue (from the desktop or the phone)
+- Deleting **or moving** the track you're listening to doesn't stop the music — playback continues with the next track in the queue, whether you used the context menu, the now-playing buttons, drag & drop or the phone
 
 ### Quality of Life
 - Single-instance app — launching a second copy activates the existing window instead of starting a duplicate

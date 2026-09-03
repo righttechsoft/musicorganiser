@@ -834,6 +834,47 @@ public sealed class DatabaseService
         return list;
     }
 
+    /// <summary>Distinct folder paths (non-deleted) whose rating matches ANY of the given
+    /// filter values — 0 means "any rating" (rating IS NOT NULL), 1-5 an exact star count.
+    /// DB-driven for the same reason as <see cref="SearchFolderPathsByTags"/>: a matching
+    /// folder can be anywhere in the library, not just under a currently-loaded tree node.</summary>
+    public IReadOnlyList<string> SearchFolderPathsByRating(IReadOnlyList<int> ratings, int limit = 500)
+    {
+        var list = new List<string>();
+        if (!IsReady || ratings == null || ratings.Count == 0) return list;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            var clauses = new List<string>();
+            if (ratings.Contains(0)) clauses.Add("rating IS NOT NULL");
+            var specific = ratings.Where(r => r is >= 1 and <= 5).Distinct().ToList();
+            if (specific.Count > 0)
+            {
+                var placeholders = new List<string>(specific.Count);
+                for (var i = 0; i < specific.Count; i++)
+                {
+                    var name = $"$r{i}";
+                    placeholders.Add(name);
+                    cmd.Parameters.AddWithValue(name, specific[i]);
+                }
+                clauses.Add($"rating IN ({string.Join(",", placeholders)})");
+            }
+            if (clauses.Count == 0) return list;
+
+            cmd.CommandText = $@"
+                SELECT full_path FROM folders
+                WHERE is_deleted = 0 AND ({string.Join(" OR ", clauses)})
+                LIMIT $lim;";
+            cmd.Parameters.AddWithValue("$lim", limit);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                list.Add(r.GetString(0));
+        }
+        catch { }
+        return list;
+    }
+
     // ------------------------------------------------------------ Playlists
 
     /// <summary>Creates a playlist and returns its new id (0 on failure).</summary>

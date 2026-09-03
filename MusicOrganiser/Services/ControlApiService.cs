@@ -568,7 +568,9 @@ public class ControlApiService : IDisposable
                 await FileOp(ctx, req, (src, dst) => _vm.FileOperations.CopyFileAsync(src, dst), needsDest: true);
                 break;
             case ("POST", "/file/move"):
-                await FileOp(ctx, req, (src, dst) => _vm.FileOperations.MoveFileAsync(src, dst), needsDest: true);
+                // VM-level move, same as delete: moving the playing track away advances the
+                // desktop to the next one instead of stopping the music.
+                await FileOp(ctx, req, (src, dst) => _vm.MoveFileAsync(src, dst), needsDest: true);
                 break;
             case ("POST", "/file/delete"):
                 // VM-level delete so the phone deleting the playing track advances the desktop

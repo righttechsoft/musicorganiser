@@ -69,9 +69,7 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(new Action(UpdateAlbumCoverPosition),
                 System.Windows.Threading.DispatcherPriority.Background);
         // Startup: bring the re-selected last-played row into view once the grid has filled.
-        viewModel.SelectionRestored += file =>
-            Dispatcher.BeginInvoke(new Action(() => MusicFilesGrid.ScrollIntoView(file)),
-                System.Windows.Threading.DispatcherPriority.Background);
+        viewModel.SelectionRestored += CentreGridOn;
         Closed += (s, e) => ViewModel.Dispose();
         Loaded += MainWindow_Loaded;
     }
@@ -167,6 +165,64 @@ public partial class MainWindow : Window
         TagsFilterToggle.Content = _selectedFolderTagFilters.Count == 0
             ? "Tags"
             : $"Tags ({_selectedFolderTagFilters.Count})";
+    }
+
+    // Folder-tree rating filter: fixed checkbox list (Any/1-5), so unlike Tags there's nothing
+    // to rebuild on popup open — Click just toggles the set and re-applies.
+    private readonly HashSet<int> _selectedFolderRatingFilters = new();
+
+    private void FolderRatingFilterCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox { Tag: string tag } cb && int.TryParse(tag, out var rating))
+        {
+            if (cb.IsChecked == true) _selectedFolderRatingFilters.Add(rating);
+            else _selectedFolderRatingFilters.Remove(rating);
+        }
+        ApplyFolderRatingFilter();
+    }
+
+    private void FolderRatingFilterClear_Click(object sender, RoutedEventArgs e)
+    {
+        _selectedFolderRatingFilters.Clear();
+        foreach (var cb in FolderRatingFilterPanel.Children.OfType<CheckBox>()) cb.IsChecked = false;
+        ApplyFolderRatingFilter();
+        FolderRatingFilterToggle.IsChecked = false;
+    }
+
+    private void ApplyFolderRatingFilter()
+    {
+        ViewModel.FolderTree.SelectedRatings = _selectedFolderRatingFilters.ToList();
+        FolderRatingFilterToggle.Content = _selectedFolderRatingFilters.Count == 0
+            ? "Rating"
+            : $"Rating ({_selectedFolderRatingFilters.Count})";
+    }
+
+    // Files-grid rating filter — same fixed checkbox list, filtering MainViewModel.MusicFilesView.
+    private void FileRatingFilterCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox { Tag: string tag } && int.TryParse(tag, out var rating))
+            ViewModel.ToggleFileRatingFilter(rating);
+        UpdateFileRatingFilterToggleLabel();
+    }
+
+    private void FileRatingFilterClear_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearFileRatingFilter();
+        foreach (var cb in FileRatingFilterPanel.Children.OfType<CheckBox>()) cb.IsChecked = false;
+        UpdateFileRatingFilterToggleLabel();
+        FileRatingFilterToggle.IsChecked = false;
+    }
+
+    private void UpdateFileRatingFilterToggleLabel()
+    {
+        var n = ViewModel.SelectedFileRatings.Count;
+        FileRatingFilterToggle.Content = n == 0 ? "Rating" : $"Rating ({n})";
+    }
+
+    private void ClearFileFilter_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.FileFilterText = string.Empty;
+        FileFilterBox.Focus();
     }
 
     private async void ManageTags_Click(object sender, RoutedEventArgs e)
@@ -280,6 +336,12 @@ public partial class MainWindow : Window
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // Playback moved to another track (Next, auto-advance, shuffle, the phone remote):
+        // PlayFile already made it the selection — put that row in the middle of the list so a
+        // shuffle jump into a long folder doesn't leave you hunting for what's playing.
+        if (e.PropertyName == nameof(MainViewModel.NowPlaying) && ViewModel.NowPlaying is { } playing)
+            CentreGridOn(playing);
+
         // Now-playing row highlight updates automatically via the NowPlayingConverter
         // MultiBinding (it watches DataContext.NowPlaying). Do NOT call Items.Refresh()
         // here: it regenerates every row container and wipes the StarRating cell display.
@@ -645,6 +707,25 @@ public partial class MainWindow : Window
         var x = tvi.TransformToAncestor(sv).Transform(new Point(0, 0)).X;
         sv.ScrollToHorizontalOffset(Math.Max(0, sv.HorizontalOffset + x - TreeIndentPerLevel));
     }
+
+    /// <summary>Scrolls the file grid so <paramref name="file"/> sits in the middle of the viewport.
+    /// Deferred to Background priority: the row it centres on may have only just been added by the
+    /// folder load, and the offsets below need a layout pass first.</summary>
+    private void CentreGridOn(MusicFile file) =>
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var index = ViewModel.MusicFiles.IndexOf(file);
+            if (index < 0) return;
+
+            MusicFilesGrid.ScrollIntoView(file);    // realizes the row and guarantees visibility
+
+            // ponytail: assumes the DataGrid's default item-based scrolling (offsets and
+            // ViewportHeight counted in rows, not pixels) — true while RowHeight is fixed and
+            // virtualization is left alone. Switch to pixel maths if ScrollUnit ever becomes Pixel.
+            var sv = FindScrollViewer(MusicFilesGrid);
+            if (sv == null || sv.ViewportHeight <= 0 || double.IsInfinity(sv.ViewportHeight)) return;
+            sv.ScrollToVerticalOffset(Math.Max(0, index - (sv.ViewportHeight - 1) / 2));
+        }), System.Windows.Threading.DispatcherPriority.Background);
 
     private static ScrollViewer? FindScrollViewer(DependencyObject root)
     {
@@ -1218,9 +1299,10 @@ public partial class MainWindow : Window
     {
         foreach (var file in selectedFiles)
         {
-            await ViewModel.FileOperations.MoveFileAsync(file.FullPath, destinationFolder);
+            // VM-level move: drops the row and hands playback to the next track if this one was
+            // playing (a folder reload here would rebuild the queue instead).
+            await ViewModel.MoveFileAsync(file.FullPath, destinationFolder);
         }
-        ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
     }
 
     private async System.Threading.Tasks.Task CopySelectedFilesToArtistFolders(string baseFolder)
@@ -1293,10 +1375,8 @@ public partial class MainWindow : Window
         {
             var artistFolder = GetArtistFolder(baseFolder, file.Artist);
             Directory.CreateDirectory(artistFolder);
-            await ViewModel.FileOperations.MoveFileAsync(file.FullPath, artistFolder);
+            await ViewModel.MoveFileAsync(file.FullPath, artistFolder);
         }
-
-        ViewModel.LoadFolder(ViewModel.CurrentFolderPath);
     }
 
     private static string GetArtistFolder(string baseFolder, string artist)
@@ -1383,7 +1463,7 @@ public partial class MainWindow : Window
         {
             var artistFolder = GetArtistFolder(baseFolder, file.Artist);
             Directory.CreateDirectory(artistFolder);
-            await ViewModel.FileOperations.MoveFileAsync(file.FullPath, artistFolder);
+            await ViewModel.MoveFileAsync(file.FullPath, artistFolder);
         }
     }
 
@@ -1398,6 +1478,50 @@ public partial class MainWindow : Window
         var file = GetSelectedFiles().FirstOrDefault();
         if (file == null) return;
         new FilePropertiesDialog(file) { Owner = this }.ShowDialog();
+    }
+
+    // ponytail: one handler per menu, the MenuItem's Tag picks which part of the path.
+    private void FileCopyText_Click(object sender, RoutedEventArgs e)
+    {
+        var files = GetSelectedFiles();
+        if (files.Count == 0) return;
+
+        var part = (sender as FrameworkElement)?.Tag as string;
+        // Multi-select copies one path per line.
+        CopyToClipboard(files.Select(f => PathPart(f.FullPath, part)));
+    }
+
+    private void FolderCopyText_Click(object sender, RoutedEventArgs e)
+    {
+        var node = _rightClickedFolder;
+        if (node == null) return;
+
+        var part = (sender as FrameworkElement)?.Tag as string;
+        // Node.Name over Path.GetFileName: a drive root ("F:\\") has no file-name component.
+        CopyToClipboard(new[] { part == "name" ? node.Name : PathPart(node.FullPath, part) });
+    }
+
+    private static string PathPart(string fullPath, string? part) => part switch
+    {
+        "name" => Path.GetFileName(fullPath),
+        "dir" => Path.GetDirectoryName(fullPath) ?? fullPath,
+        _ => fullPath,
+    };
+
+    private static void CopyToClipboard(IEnumerable<string> lines)
+    {
+        var text = string.Join(Environment.NewLine, lines);
+        if (text.Length == 0) return;
+
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception ex)   // another app can hold the clipboard open
+        {
+            MessageBox.Show($"Couldn't copy to clipboard: {ex.Message}", "Copy",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     #endregion

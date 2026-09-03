@@ -276,6 +276,10 @@
                         <MenuItem Header="Tag..." Click="FolderTag_Click"/>
                         <MenuItem Header="Bulk tag subfolders..." Click="BulkTag_Click"/>
                         <Separator/>
+                        <MenuItem Header="Copy folder name" Tag="name" Click="FolderCopyText_Click"/>
+                        <MenuItem Header="Copy path" Tag="dir" Click="FolderCopyText_Click"/>
+                        <MenuItem Header="Copy full path" Tag="full" Click="FolderCopyText_Click"/>
+                        <Separator/>
                         <MenuItem x:Name="FolderCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FolderMoveToMenu" Header="Move To"/>
                         <Separator/>
@@ -332,9 +336,14 @@
                               SelectedItem="{Binding FolderTree.SelectedSortOption}"
                               ToolTip="Sort folders by"/>
                     <Grid Grid.Row="2">
-                        <ToggleButton x:Name="TagsFilterToggle" Content="Tags"
-                                      HorizontalAlignment="Left" Padding="6,3"
-                                      ToolTip="Filter folders by tag"/>
+                        <StackPanel Orientation="Horizontal">
+                            <ToggleButton x:Name="TagsFilterToggle" Content="Tags"
+                                          Padding="6,3"
+                                          ToolTip="Filter folders by tag"/>
+                            <ToggleButton x:Name="FolderRatingFilterToggle" Content="Rating"
+                                          Padding="6,3" Margin="6,0,0,0"
+                                          ToolTip="Filter folders by rating"/>
+                        </StackPanel>
                         <Popup x:Name="TagsFilterPopup" PlacementTarget="{Binding ElementName=TagsFilterToggle}"
                                Placement="Bottom" StaysOpen="False"
                                IsOpen="{Binding IsChecked, ElementName=TagsFilterToggle, Mode=TwoWay}"
@@ -359,6 +368,24 @@
                                         <Button Content="Manage tags..." Click="ManageTags_Click"
                                                 Margin="8,0,0,0" Padding="6,2"/>
                                     </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Popup>
+                        <Popup PlacementTarget="{Binding ElementName=FolderRatingFilterToggle}"
+                               Placement="Bottom" StaysOpen="False"
+                               IsOpen="{Binding IsChecked, ElementName=FolderRatingFilterToggle, Mode=TwoWay}">
+                            <Border Background="White" BorderBrush="#AAAAAA" BorderThickness="1" Padding="6" MinWidth="120">
+                                <StackPanel>
+                                    <StackPanel x:Name="FolderRatingFilterPanel">
+                                        <CheckBox Content="Any rating" Margin="2" Tag="0" Click="FolderRatingFilterCheckBox_Click"/>
+                                        <CheckBox Content="&#9733; 1" Margin="2" Tag="1" Click="FolderRatingFilterCheckBox_Click"/>
+                                        <CheckBox Content="&#9733; 2" Margin="2" Tag="2" Click="FolderRatingFilterCheckBox_Click"/>
+                                        <CheckBox Content="&#9733; 3" Margin="2" Tag="3" Click="FolderRatingFilterCheckBox_Click"/>
+                                        <CheckBox Content="&#9733; 4" Margin="2" Tag="4" Click="FolderRatingFilterCheckBox_Click"/>
+                                        <CheckBox Content="&#9733; 5" Margin="2" Tag="5" Click="FolderRatingFilterCheckBox_Click"/>
+                                    </StackPanel>
+                                    <Separator Margin="0,4"/>
+                                    <Button Content="Clear" Click="FolderRatingFilterClear_Click" Padding="6,2" HorizontalAlignment="Left"/>
                                 </StackPanel>
                             </Border>
                         </Popup>
@@ -423,6 +450,7 @@
         <Grid Grid.Column="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="4*"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -484,8 +512,62 @@
                 </ScrollViewer>
             </Border>
 
+            <!-- Files filter bar: text search + star-rating multi-select (any/specific, OR'd) -->
+            <Border Grid.Row="1" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,0,0,1" Padding="5">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Grid.Column="0" Margin="0,0,6,0">
+                        <TextBox x:Name="FileFilterBox"
+                                 Text="{Binding FileFilterText, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Filter files by name, title, artist or album"
+                                 Padding="4,2,20,2"/>
+                        <Button Content="&#x2715;" Click="ClearFileFilter_Click"
+                                HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Width="18" Height="18" Margin="0,0,3,0" Padding="0"
+                                Background="Transparent" BorderThickness="0"
+                                Foreground="#888888" FontSize="11" Cursor="Hand"
+                                ToolTip="Clear filter">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding FileFilterText}" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
+                    <ToggleButton Grid.Column="1" x:Name="FileRatingFilterToggle" Content="Rating"
+                                  Padding="6,3" VerticalAlignment="Center"
+                                  ToolTip="Filter files by rating"/>
+                    <Popup PlacementTarget="{Binding ElementName=FileRatingFilterToggle}"
+                           Placement="Bottom" StaysOpen="False"
+                           IsOpen="{Binding IsChecked, ElementName=FileRatingFilterToggle, Mode=TwoWay}">
+                        <Border Background="White" BorderBrush="#AAAAAA" BorderThickness="1" Padding="6" MinWidth="120">
+                            <StackPanel>
+                                <StackPanel x:Name="FileRatingFilterPanel">
+                                    <CheckBox Content="Any rating" Margin="2" Tag="0" Click="FileRatingFilterCheckBox_Click"/>
+                                    <CheckBox Content="&#9733; 1" Margin="2" Tag="1" Click="FileRatingFilterCheckBox_Click"/>
+                                    <CheckBox Content="&#9733; 2" Margin="2" Tag="2" Click="FileRatingFilterCheckBox_Click"/>
+                                    <CheckBox Content="&#9733; 3" Margin="2" Tag="3" Click="FileRatingFilterCheckBox_Click"/>
+                                    <CheckBox Content="&#9733; 4" Margin="2" Tag="4" Click="FileRatingFilterCheckBox_Click"/>
+                                    <CheckBox Content="&#9733; 5" Margin="2" Tag="5" Click="FileRatingFilterCheckBox_Click"/>
+                                </StackPanel>
+                                <Separator Margin="0,4"/>
+                                <Button Content="Clear" Click="FileRatingFilterClear_Click" Padding="6,2" HorizontalAlignment="Left"/>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+                </Grid>
+            </Border>
+
             <!-- Music Files Grid (with album cover behind) -->
-            <Grid Grid.Row="1" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged"
+            <Grid Grid.Row="2" x:Name="CoverHost" SizeChanged="CoverHost_SizeChanged"
                   MouseLeftButtonUp="CoverHost_MouseLeftButtonUp">
             <!-- Album Cover (behind the file list) -->
             <!-- Holds the outgoing cover so art changes crossfade instead of popping. -->
@@ -520,7 +602,7 @@
 
             <DataGrid x:Name="MusicFilesGrid"
                       Background="Transparent"
-                      ItemsSource="{Binding MusicFiles}"
+                      ItemsSource="{Binding MusicFilesView}"
                       SelectedItem="{Binding SelectedFile}"
                       AutoGenerateColumns="False"
                       IsReadOnly="True"
@@ -685,6 +767,10 @@
                 <DataGrid.ContextMenu>
                     <ContextMenu x:Name="FileContextMenu" Opened="FileContextMenu_Opened"
                                  DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                        <MenuItem Header="Copy filename" Tag="name" Click="FileCopyText_Click"/>
+                        <MenuItem Header="Copy path" Tag="dir" Click="FileCopyText_Click"/>
+                        <MenuItem Header="Copy full path" Tag="full" Click="FileCopyText_Click"/>
+                        <Separator/>
                         <MenuItem x:Name="FileCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FileMoveToMenu" Header="Move To"/>
                         <Separator/>
@@ -717,7 +803,7 @@
             </Grid>
 
             <!-- Karaoke Lyrics Panel -->
-            <Border Grid.Row="2" Background="#FAFAFA" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0"
+            <Border Grid.Row="3" Background="#FAFAFA" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0"
                     Padding="10,6"
                     Visibility="{Binding ShowLyrics, Converter={StaticResource BoolToVis}}">
                 <Border.Style>
@@ -1160,7 +1246,7 @@
             </Border>
 
             <!-- Audio Player Control -->
-            <Border Grid.Row="3" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10"
+            <Border Grid.Row="4" Background="#F0F0F0" BorderBrush="#CCCCCC" BorderThickness="0,1,0,0" Padding="10"
                     MouseWheel="PlayerPanel_MouseWheel">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -1229,7 +1315,9 @@
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
+                                <!-- ponytail: Auto, not *, or the star share starves this column and the
+                                     device/buffer boxes overflow left and get clipped by the transport buttons. -->
+                                <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left">
@@ -1320,7 +1408,7 @@
                             <!-- Output Device + Volume Controls -->
                             <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                                 <!-- WASAPI buffer size -->
-                                <ComboBox Width="60" Height="22"
+                                <ComboBox Width="82" Height="22"
                                           VerticalAlignment="Center" Margin="0,0,4,0"
                                           ItemsSource="{Binding BufferOptions}"
                                           SelectedItem="{Binding OutputBufferMs, Mode=TwoWay}"
