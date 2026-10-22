@@ -583,10 +583,15 @@ class _TransportSheet extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    IconButton(
-                      onPressed: player.toggleShuffle,
-                      icon: Icon(Icons.shuffle,
-                          color: player.shuffle ? AppColors.accent : AppColors.muted),
+                    shuffleMenu(
+                      enabled: player.shuffle,
+                      onLabel: 'Shuffle',
+                      onSelected: player.setShuffle,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Icon(Icons.shuffle,
+                            color: player.shuffle ? AppColors.accent : AppColors.muted),
+                      ),
                     ),
                     IconButton(
                         onPressed: player.prev,
@@ -596,13 +601,22 @@ class _TransportSheet extends StatelessWidget {
                         icon: Icon(player.playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
                             size: 56, color: AppColors.accent)),
                     IconButton(
+                        onPressed: player.toggleStopAfterCurrent,
+                        tooltip: 'Stop after current track',
+                        icon: Icon(Icons.stop_circle_outlined,
+                            color: player.stopAfterCurrent ? AppColors.accent : AppColors.muted)),
+                    IconButton(
                         onPressed: player.next,
                         icon: const Icon(Icons.skip_next_rounded, size: 32, color: AppColors.text)),
-                    IconButton(
-                      onPressed: player.cycleRepeat,
-                      icon: Icon(
-                        player.repeat == 'one' ? Icons.repeat_one : Icons.repeat,
-                        color: player.repeat == 'off' ? AppColors.muted : AppColors.accent,
+                    repeatMenu(
+                      mode: player.repeat,
+                      onSelected: player.setRepeat,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Icon(
+                          player.repeat == 'one' ? Icons.repeat_one : Icons.repeat,
+                          color: player.repeat == 'off' ? AppColors.muted : AppColors.accent,
+                        ),
                       ),
                     ),
                   ],

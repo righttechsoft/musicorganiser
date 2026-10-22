@@ -65,6 +65,13 @@ public partial class MainWindow : Window
         var viewModel = new MainViewModel();
         DataContext = viewModel;
         viewModel.PropertyChanged += ViewModel_PropertyChanged;
+        // Waveform bar pulls live levels / the audible playhead itself each rendered frame.
+        SeekBar.LiveSource = () => viewModel.AudioPlayer.GetLiveLevels();
+        SeekBar.PositionSource = () =>
+        {
+            double total = viewModel.AudioPlayer.TotalDuration.TotalSeconds;
+            return total > 0 ? viewModel.AudioPlayer.AudiblePosition.TotalSeconds / total * 100 : null;
+        };
         viewModel.MusicFiles.CollectionChanged += (s, e) =>
             Dispatcher.BeginInvoke(new Action(UpdateAlbumCoverPosition),
                 System.Windows.Threading.DispatcherPriority.Background);
@@ -714,7 +721,7 @@ public partial class MainWindow : Window
     private void CentreGridOn(MusicFile file) =>
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            var index = ViewModel.MusicFiles.IndexOf(file);
+            var index = MusicFilesGrid.Items.IndexOf(file);
             if (index < 0) return;
 
             MusicFilesGrid.ScrollIntoView(file);    // realizes the row and guarantees visibility
@@ -797,17 +804,6 @@ public partial class MainWindow : Window
             d = VisualTreeHelper.GetParent(d);
         }
         return null;
-    }
-
-    private void ProgressBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is System.Windows.Controls.ProgressBar progressBar && ViewModel.TotalDuration.TotalSeconds > 0)
-        {
-            var clickPosition = e.GetPosition(progressBar);
-            var percentage = clickPosition.X / progressBar.ActualWidth;
-            var newPosition = TimeSpan.FromSeconds(percentage * ViewModel.TotalDuration.TotalSeconds);
-            ViewModel.AudioPlayer.Seek(newPosition);
-        }
     }
 
     private bool _draggingVolume;
@@ -1015,19 +1011,7 @@ public partial class MainWindow : Window
         if (folder != null && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddMoveFolder(folder);
-            var folderPath = _rightClickedFolder.FullPath;
-            var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
-            if (success)
-            {
-                _rightClickedFolder.MarkAsDeleted();
-                // Clear music files if the moved folder was selected
-                if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    ViewModel.MusicFiles.Clear();
-                }
-            }
-            else
-                MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            await MoveFolderWithDuplicateCheck(_rightClickedFolder, folder);
         }
     }
 
@@ -1076,7 +1060,8 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             var folderPath = _rightClickedFolder.FullPath;
-            var success = await ViewModel.FileOperations.DeleteFolderAsync(folderPath);
+            var success = await ViewModel.RunWithBusyOverlayAsync("Deleting folder...",
+                () => ViewModel.FileOperations.DeleteFolderAsync(folderPath));
             if (success)
             {
                 _rightClickedFolder.MarkAsDeleted();
@@ -1106,19 +1091,7 @@ public partial class MainWindow : Window
         if (sender is MenuItem menuItem && menuItem.Tag is string folder && _rightClickedFolder != null)
         {
             ViewModel.RecentFolders.AddMoveFolder(folder);
-            var folderPath = _rightClickedFolder.FullPath;
-            var success = await ViewModel.FileOperations.MoveFolderAsync(folderPath, folder);
-            if (success)
-            {
-                _rightClickedFolder.MarkAsDeleted();
-                // Clear music files if the moved folder was selected
-                if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    ViewModel.MusicFiles.Clear();
-                }
-            }
-            else
-                MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            await MoveFolderWithDuplicateCheck(_rightClickedFolder, folder);
         }
     }
 
@@ -1207,6 +1180,53 @@ public partial class MainWindow : Window
                 // one was playing (a folder reload here would rebuild the queue instead).
                 await ViewModel.DeleteFileAsync(file.FullPath);
             }
+        }
+    }
+
+    private async void FileConvertMp3_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedFiles = GetSelectedFiles();
+        var errors = new List<string>();
+        foreach (var file in selectedFiles)
+        {
+            try { await ViewModel.ConvertToMp3Async(file.FullPath); }
+            catch (Exception ex) { errors.Add($"{file.FileName}: {ex.Message}"); }
+        }
+        if (errors.Count > 0)
+            MessageBox.Show(string.Join("\n", errors), "Convert to MP3", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    private async void FileSplitCue_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedFiles = GetSelectedFiles();
+        if (selectedFiles.Count != 1)
+        {
+            MessageBox.Show("Select a single audio file to split.", "Split by .cue",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var path = selectedFiles[0].FullPath;
+        var cue = await Task.Run(() => AudioToolsService.FindCue(path));
+        if (cue == null)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "Choose the .cue sheet",
+                Filter = "Cue sheets (*.cue)|*.cue",
+                InitialDirectory = Path.GetDirectoryName(path)
+            };
+            if (dlg.ShowDialog(this) != true) return;
+            cue = dlg.FileName;
+        }
+        try
+        {
+            var created = await ViewModel.SplitByCueAsync(path, cue);
+            MessageBox.Show($"Created {created.Count} FLAC file(s).", "Split by .cue",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Split by .cue", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -1640,90 +1660,116 @@ public partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task CopyFolderWithDuplicateCheck(string sourcePath, string destinationFolder)
     {
-        var destPath = Path.Combine(destinationFolder, Path.GetFileName(sourcePath));
+        await TransferFolderWithDuplicateCheck(sourcePath, destinationFolder, move: false);
+    }
 
-        if (Directory.Exists(destPath))
+    // Folder move: shared dialog/transfer path, then reconcile the tree node with what is left on disk.
+    private async System.Threading.Tasks.Task<bool> MoveFolderWithDuplicateCheck(FolderNode node, string destinationFolder)
+    {
+        var folderPath = node.FullPath;
+        if (!await TransferFolderWithDuplicateCheck(folderPath, destinationFolder, move: true))
+            return false;
+
+        if (!Directory.Exists(folderPath))
         {
-            // Show folder duplicate dialog
-            var sourceInfo = FolderComparisonInfo.FromPath(sourcePath);
-            var targetInfo = FolderComparisonInfo.FromPath(destPath);
-
-            var dialog = new FolderDuplicateDialog(sourceInfo, targetInfo)
+            node.MarkAsDeleted();
+            // Clear music files if the moved folder was selected
+            if (ViewModel.CurrentFolderPath.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase))
             {
-                Owner = this
-            };
-
-            if (dialog.ShowDialog() != true)
-            {
-                return; // Dialog was closed without a choice
-            }
-
-            var action = dialog.Result;
-            if (action == FolderDuplicateAction.Cancel)
-            {
-                return;
-            }
-
-            // For merge operations, we need a callback to handle file duplicates
-            FileDuplicateAction? mergeApplyToAll = null;
-            Func<string, string, FileDuplicateAction>? onFileDuplicate = null;
-
-            if (action == FolderDuplicateAction.Merge)
-            {
-                onFileDuplicate = (sourceFile, targetFile) =>
-                {
-                    // If we have an "apply to all" action, use it
-                    if (mergeApplyToAll.HasValue)
-                    {
-                        return mergeApplyToAll.Value;
-                    }
-
-                    // Show file duplicate dialog on UI thread
-                    FileDuplicateAction fileAction = FileDuplicateAction.Skip;
-
-                    Dispatcher.Invoke(() =>
-                    {
-                        var srcInfo = FileComparisonInfo.FromPath(sourceFile);
-                        var tgtInfo = FileComparisonInfo.FromPath(targetFile);
-
-                        var fileDialog = new FileDuplicateDialog(srcInfo, tgtInfo, true)
-                        {
-                            Owner = this
-                        };
-
-                        if (fileDialog.ShowDialog() == true)
-                        {
-                            fileAction = fileDialog.Result;
-                            if (fileDialog.ApplyToAll && fileAction != FileDuplicateAction.Cancel)
-                            {
-                                mergeApplyToAll = fileAction;
-                            }
-                        }
-                        else
-                        {
-                            fileAction = FileDuplicateAction.Cancel;
-                        }
-                    });
-
-                    return fileAction;
-                };
-            }
-
-            var success = await ViewModel.FileOperations.CopyFolderAsync(sourcePath, destinationFolder, action, onFileDuplicate);
-            if (!success)
-            {
-                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                ViewModel.MusicFiles.Clear();
             }
         }
         else
         {
-            // No conflict, copy normally
-            var success = await ViewModel.FileOperations.CopyFolderAsync(sourcePath, destinationFolder);
-            if (!success)
+            node.Refresh(); // a merge left skipped duplicates behind
+            // The grid still lists files that have moved away
+            var current = ViewModel.CurrentFolderPath;
+            if (SamePath(current, folderPath) || IsUnder(current, folderPath))
             {
-                MessageBox.Show("Failed to copy folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                if (Directory.Exists(current)) ViewModel.LoadFolder(current);
+                else ViewModel.MusicFiles.Clear();
             }
         }
+        return true;
+    }
+
+    // Single entry point for every folder copy/move. No similar-named folder in the destination: plain
+    // copy/move. Otherwise ask (merge / replace / keep both). Returns false on cancel, skip or failure.
+    private async System.Threading.Tasks.Task<bool> TransferFolderWithDuplicateCheck(string sourcePath, string destinationFolder, bool move)
+    {
+        var candidates = ViewModel.FileOperations.FindSimilarFolders(sourcePath, destinationFolder);
+        var failMessage = move ? "Failed to move folder." : "Failed to copy folder.";
+        var busyText = move ? "Moving folder..." : "Copying folder...";
+        bool success;
+
+        if (candidates.Count == 0)
+        {
+            success = await ViewModel.RunWithBusyOverlayAsync(busyText, () => move
+                ? ViewModel.FileOperations.MoveFolderAsync(sourcePath, destinationFolder)
+                : ViewModel.FileOperations.CopyFolderAsync(sourcePath, destinationFolder));
+            if (!success)
+                MessageBox.Show(failMessage, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return success;
+        }
+
+        var dialog = new FolderDuplicateDialog(sourcePath, candidates, destinationFolder, move, ViewModel.FileOperations)
+        {
+            Owner = this
+        };
+
+        var chose = dialog.ShowDialog() == true;
+
+        // Renames done inside the dialog happen on disk immediately, even if the dialog is then cancelled
+        // (the folder tree nodes are left as they were: a renamed subfolder shows its old name until its parent is refreshed)
+        if (dialog.RenamedAnything)
+        {
+            var current = ViewModel.CurrentFolderPath;
+            if (!string.IsNullOrEmpty(current) &&
+                (SamePath(current, sourcePath) || IsUnder(current, sourcePath) ||
+                 candidates.Any(c => SamePath(current, c) || IsUnder(current, c))))
+            {
+                if (Directory.Exists(current)) ViewModel.LoadFolder(current);
+                else ViewModel.MusicFiles.Clear();
+            }
+        }
+
+        if (!chose)
+        {
+            return false; // Dialog was closed without a choice
+        }
+
+        var action = dialog.Result;
+        if (action != FolderDuplicateAction.Custom && action != FolderDuplicateAction.KeepBoth && action != FolderDuplicateAction.IntoTarget)
+        {
+            return false;
+        }
+
+        success = await ViewModel.RunWithBusyOverlayAsync(busyText, () => action == FolderDuplicateAction.Custom
+            ? ViewModel.FileOperations.ApplyFolderPlanAsync(sourcePath, dialog.TargetPath, move, dialog.Plan)
+            : action == FolderDuplicateAction.IntoTarget
+                // As a subfolder of the selected folder: Keep both with the target as the destination
+                ? ViewModel.FileOperations.TransferFolderAsync(
+                    sourcePath, dialog.TargetPath, move, FolderDuplicateAction.KeepBoth, null, dialog.NewName, null)
+                : ViewModel.FileOperations.TransferFolderAsync(
+                    sourcePath, destinationFolder, move, action, null, dialog.NewName, null));
+        if (!success)
+        {
+            MessageBox.Show(failMessage, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
+
+        // The plan may have added, overwritten or deleted files in the target, so a grid showing it is stale
+        if (action == FolderDuplicateAction.Custom)
+        {
+            var current = ViewModel.CurrentFolderPath;
+            if (!string.IsNullOrEmpty(current) && (SamePath(current, dialog.TargetPath) || IsUnder(current, dialog.TargetPath)))
+            {
+                if (Directory.Exists(current)) ViewModel.LoadFolder(current);
+                else ViewModel.MusicFiles.Clear();
+            }
+        }
+
+        return true;
     }
 
     private void BuildRecentFoldersMenu(MenuItem parentMenu, List<string> recentFolders, RoutedEventHandler clickHandler)
@@ -1895,16 +1941,9 @@ public partial class MainWindow : Window
         {
             await CopyFolderWithDuplicateCheck(src.FullPath, target.FullPath);
         }
-        else if (await ViewModel.FileOperations.MoveFolderAsync(src.FullPath, target.FullPath))
+        else if (!await MoveFolderWithDuplicateCheck(src, target.FullPath))
         {
-            src.MarkAsDeleted();
-            if (ViewModel.CurrentFolderPath.StartsWith(src.FullPath, StringComparison.OrdinalIgnoreCase))
-                ViewModel.MusicFiles.Clear();
-        }
-        else
-        {
-            MessageBox.Show("Failed to move folder.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
+            return;   // cancelled or failed (the helper already showed the error)
         }
 
         target.IsExpanded = true;   // Refresh only reloads children of an open node
@@ -1917,6 +1956,14 @@ public partial class MainWindow : Window
 
     // Copy/Move/Delete acting on the *playing* file rather than the grid selection.
     // Copy/Move drop the same recent-folders + Browse... list the grid's context menu uses.
+    private void DropdownButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { ContextMenu: { } menu } button) return;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
     private void NowPlayingCopy_Click(object sender, RoutedEventArgs e) =>
         ShowNowPlayingDestinationMenu(sender, ViewModel.RecentFolders.CopyFolders, async (file, folder) =>
         {

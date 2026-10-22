@@ -24,6 +24,7 @@ class OfflinePlayer extends ChangeNotifier {
   int _pos = -1;                  // position within _order
   bool shuffle = false;
   String repeat = 'off';          // off | all | one
+  bool stopAfterCurrent = false;
   bool _loading = false;          // suppresses auto-advance while a load is in flight
   // Generation token: every new load/stop invalidates in-flight _load()s so a
   // superseded setFilePath can't skip-advance or play() after stop.
@@ -100,6 +101,12 @@ class OfflinePlayer extends ChangeNotifier {
   }
 
   void _onCompleted() {
+    if (stopAfterCurrent) {
+      stopAfterCurrent = false;
+      _p.stop();
+      notifyListeners();
+      return;
+    }
     if (repeat == 'one') {
       _p.seek(Duration.zero);
       _p.play();
@@ -187,6 +194,21 @@ class OfflinePlayer extends ChangeNotifier {
       _pos = cur;
     }
     notifyListeners();
+  }
+
+  void setShuffle(bool on) {
+    if (on != shuffle) toggleShuffle();
+  }
+
+  void toggleStopAfterCurrent() {
+    stopAfterCurrent = !stopAfterCurrent;
+    notifyListeners();
+  }
+
+  void setRepeat(String mode) {
+    while (repeat != mode) {
+      cycleRepeat();
+    }
   }
 
   void cycleRepeat() {

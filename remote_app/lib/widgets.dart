@@ -471,3 +471,47 @@ class Panel extends StatelessWidget {
         child: child,
       );
 }
+
+PopupMenuEntry<T> _modeItem<T>(T value, IconData? icon, String label, bool selected) => PopupMenuItem<T>(
+      value: value,
+      child: Row(
+        children: [
+          SizedBox(width: 24, child: icon == null ? null : Icon(icon, size: 18, color: AppColors.muted)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(label)),
+          if (selected) const Icon(Icons.check, size: 18, color: AppColors.accent),
+        ],
+      ),
+    );
+
+Widget shuffleMenu({
+  required bool enabled,
+  required String onLabel,
+  required ValueChanged<bool> onSelected,
+  required Widget child,
+}) =>
+    PopupMenuButton<bool>(
+      tooltip: 'Shuffle',
+      onSelected: onSelected,
+      itemBuilder: (_) => [
+        _modeItem(false, null, 'Off', !enabled),
+        _modeItem(true, Icons.shuffle, onLabel, enabled),
+      ],
+      child: child,
+    );
+
+Widget repeatMenu({
+  required String mode,
+  required ValueChanged<String> onSelected,
+  required Widget child,
+}) =>
+    PopupMenuButton<String>(
+      tooltip: 'Repeat',
+      onSelected: onSelected,
+      itemBuilder: (_) => [
+        _modeItem('off', null, 'Off', mode == 'off'),
+        _modeItem('all', Icons.repeat, 'Repeat all', mode == 'all'),
+        _modeItem('one', Icons.repeat_one, 'Repeat one', mode == 'one'),
+      ],
+      child: child,
+    );

@@ -1,8 +1,12 @@
 ﻿using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MusicOrganiser.Models;
+
+/// <summary>How the transport bar draws the track: Bars = loudness bars coloured by spectral balance; the rest also show tempo/beat.</summary>
+public enum WaveformStyle { Bars, Ribbons, Strands, BeatBars, Spectrum }
 
 public class AppSettings
 {
@@ -20,6 +24,10 @@ public class AppSettings
     // WASAPI output buffer in ms (100–1000). Bigger survives CPU starvation;
     // smaller gives snappier in-app volume / audible-seek response.
     public int OutputBufferMs { get; set; } = 300;
+
+    // Seek bar drawing style (stored by name in settings.json).
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public WaveformStyle WaveformStyle { get; set; } = WaveformStyle.Ribbons;
 
     // Last folder browsed; restored on next launch. null = nothing to restore.
     public string? LastFolderPath { get; set; }

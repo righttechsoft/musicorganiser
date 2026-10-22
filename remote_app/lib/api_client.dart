@@ -88,6 +88,8 @@ class ApiClient {
 
   // ---- playback ----
   Future<void> playback(String action) => http.post(_u('/playback/$action'));
+  Future<void> setShuffle(bool enabled) => _post('/playback/shuffle', {'enabled': enabled});
+  Future<void> setRepeat(String mode) => _post('/playback/repeat', {'mode': mode});
   Future<void> seek(int sec) => _post('/playback/seek', {'positionSec': sec});
   Future<void> setVolume(int level) => _post('/volume', {'level': level});
   Future<void> setSystemVolume(int level) => _post('/system-volume', {'level': level});
@@ -148,9 +150,64 @@ class ApiClient {
       _postOk('/file/copy', {'path': path, 'destFolder': dest});
   Future<bool> moveFile(String path, String dest) =>
       _postOk('/file/move', {'path': path, 'destFolder': dest});
+  // Long-running (blocks until the desktop finishes): 10 min timeout. Returns the server's JSON
+  // ({success, error?, output?/count?}) so callers can show the error text.
+  Future<Map<String, dynamic>> convertToMp3(String path) => _postLong('/file/convert-mp3', {'path': path});
+  Future<Map<String, dynamic>> splitByCue(String path) => _postLong('/file/split-cue', {'path': path});
+
   Future<bool> deleteFile(String path) => _postOk('/file/delete', {'path': path});
-  Future<bool> moveFolder(String path, String dest) =>
-      _postOk('/folder/move', {'path': path, 'destFolder': dest});
+  // action: merge | replace | keep (+ target for merge/replace, newName for keep); none = legacy move.
+  Future<bool> moveFolder(String path, String dest, {String? action, String? target, String? newName}) =>
+      _postOk('/folder/move', {
+        'path': path,
+        'destFolder': dest,
+        'action': ?action,
+        'target': ?target,
+        'newName': ?newName,
+      });
+
+  // Loudness peaks (0-255) for the seek bar; null on any error / older desktop / not computable.
+  Future<WaveformData?> waveform(String path) async {
+    try {
+      final r = await http.get(_u('/file/waveform', {'path': path})).timeout(const Duration(seconds: 30));
+      if (r.statusCode != 200) return null;
+      final j = jsonDecode(r.body);
+      if (j is! Map) return null;
+      List<int>? ints(dynamic v) => v is List ? v.map((e) => e is num ? e.toInt() : 0).toList() : null;
+      final peaks = ints(j['peaks']);
+      if (peaks == null || peaks.isEmpty) return null;
+      final low = ints(j['low']), mid = ints(j['mid']), high = ints(j['high']);
+      final ok = low != null && mid != null && high != null &&
+          low.length == peaks.length && mid.length == peaks.length && high.length == peaks.length;
+      if (!ok) return WaveformData(peaks);
+      var tempo = ints(j['tempo']), beat = ints(j['beat']);
+      if (tempo != null && tempo.length != peaks.length) tempo = null;
+      if (beat != null && beat.length != peaks.length) beat = null;
+      List<List<int>>? spectrum;
+      final sp = j['spectrum'];
+      if (sp is List && sp.length == 8) {
+        final rows = sp.map(ints).toList();
+        if (rows.every((r) => r != null && r.length == peaks.length)) spectrum = rows.cast<List<int>>();
+      }
+      return WaveformData(peaks, low: low, mid: mid, high: high, tempo: tempo, beat: beat, spectrum: spectrum);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Empty result on any error / older desktop build, so the move falls back to the legacy behaviour.
+  Future<SimilarFolders> similarFolders(String path, String dest) async {
+    try {
+      final r = await http
+          .get(_u('/folder/similar', {'path': path, 'destFolder': dest}))
+          .timeout(const Duration(seconds: 60)); // the desktop walks both folders
+      if (r.statusCode != 200) return SimilarFolders();
+      final j = jsonDecode(r.body);
+      return j is Map<String, dynamic> ? SimilarFolders.fromJson(j) : SimilarFolders();
+    } catch (_) {
+      return SimilarFolders();
+    }
+  }
   Future<bool> deleteFolder(String path) => _postOk('/folder/delete', {'path': path});
 
   // ---- playlists ----
@@ -189,6 +246,15 @@ class ApiClient {
 
   Future<http.Response> _post(String path, Map<String, dynamic> body) => http.post(_u(path),
       headers: {'Content-Type': 'application/json'}, body: jsonEncode(body));
+
+  Future<Map<String, dynamic>> _postLong(String path, Map<String, dynamic> body) async {
+    final r = await _post(path, body).timeout(const Duration(minutes: 10));
+    try {
+      final j = jsonDecode(r.body);
+      if (j is Map<String, dynamic>) return j;
+    } catch (_) {}
+    return {'success': false, 'error': 'Unexpected response (${r.statusCode})'};
+  }
 
   Future<bool> _postOk(String path, Map<String, dynamic> body) async {
     final r = await _post(path, body);

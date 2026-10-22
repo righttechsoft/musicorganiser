@@ -17,6 +17,7 @@
         <converters:NullToVisibilityConverter x:Key="NullToVisibilityConverter"/>
         <converters:NullToBoolConverter x:Key="NullToBoolConverter"/>
         <converters:CountToVisibilityConverter x:Key="CountToVisibilityConverter"/>
+        <converters:EqualsConverter x:Key="EqualsConverter"/>
         <converters:TitleConverter x:Key="TitleConverter"/>
         <converters:PlayingFolderFontWeightConverter x:Key="PlayingFolderFontWeightConverter"/>
 
@@ -699,8 +700,8 @@
                     <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="*" MinWidth="100"/>
                     <DataGridTextColumn Header="Artist" Binding="{Binding Artist}" Width="*" MinWidth="100"/>
                     <DataGridTextColumn Header="Album" Binding="{Binding Album}" Width="*" MinWidth="100"/>
-                    <DataGridTextColumn Header="Duration" Binding="{Binding DurationFormatted}" Width="70"/>
-                    <DataGridTextColumn Header="Bitrate" Binding="{Binding BitrateFormatted}" Width="80"/>
+                    <DataGridTextColumn Header="Duration" Binding="{Binding DurationFormatted}" SortMemberPath="Duration" Width="70"/>
+                    <DataGridTextColumn Header="Bitrate" Binding="{Binding BitrateFormatted}" SortMemberPath="Bitrate" Width="80"/>
                     <DataGridTextColumn Header="Genre" Binding="{Binding Genre}" Width="80"/>
                     <DataGridTextColumn Header="Year" Binding="{Binding Year}" Width="50"/>
                     <DataGridTemplateColumn Header="" Width="24" CanUserSort="False">
@@ -718,7 +719,7 @@
                          until hover, and the tags TextBox outgrows its TextBlock. Without the grid's
                          pinned RowHeight above, every hover re-measured the row and the list nudged
                          itself a few pixels under the cursor. Keep new cell content within 22px. -->
-                    <DataGridTemplateColumn Header="Rating" Width="90" CanUserSort="False">
+                    <DataGridTemplateColumn Header="Rating" Width="90" SortMemberPath="Rating">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <controls:StarRating Rating="{Binding Rating, Mode=TwoWay}"
@@ -774,6 +775,9 @@
                         <MenuItem x:Name="FileCopyToMenu" Header="Copy To"/>
                         <MenuItem x:Name="FileMoveToMenu" Header="Move To"/>
                         <Separator/>
+                        <MenuItem Header="Convert to MP3" Click="FileConvertMp3_Click"/>
+                        <MenuItem Header="Split by .cue..." Click="FileSplitCue_Click"/>
+                        <Separator/>
                         <MenuItem x:Name="FileAddToPlaylistMenu" Header="Add to Playlist"/>
                         <MenuItem Header="New Playlist from Selection" Click="NewPlaylistFromSelection_Click"/>
                         <Separator/>
@@ -797,6 +801,16 @@
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                     <ProgressBar IsIndeterminate="True" Width="180" Height="6"/>
                     <TextBlock Text="Loading files…" HorizontalAlignment="Center"
+                               Margin="0,8,0,0" Foreground="#555555"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Audio tool (convert / split) progress -->
+            <Border Background="#80FFFFFF" IsHitTestVisible="False"
+                    Visibility="{Binding IsToolBusy, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <ProgressBar IsIndeterminate="True" Width="180" Height="6"/>
+                    <TextBlock Text="{Binding ToolStatus}" HorizontalAlignment="Center"
                                Margin="0,8,0,0" Foreground="#555555"/>
                 </StackPanel>
             </Border>
@@ -1277,6 +1291,25 @@
                                        VerticalAlignment="Center"/>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                                         IsEnabled="{Binding NowPlaying, Converter={StaticResource NullToBoolConverter}}">
+                                <Button Command="{Binding StartKaraokeCommand}" ToolTip="Karaoke">
+                                    <Button.Content>
+                                        <TextBlock Text="&#xE720;" FontFamily="Segoe MDL2 Assets" FontSize="13" FontWeight="Normal"/>
+                                    </Button.Content>
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Setter Property="Width" Value="24"/>
+                                            <Setter Property="Height" Value="24"/>
+                                            <Setter Property="Margin" Value="0,0,6,0"/>
+                                            <Setter Property="Foreground" Value="#BBBBBB"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
+                                                    <Setter Property="Background" Value="#90CAF9"/>
+                                                    <Setter Property="Foreground" Value="Black"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                                 <controls:StarRating Rating="{Binding NowPlaying.Rating, Mode=TwoWay}" EditMode="True"
                                                      VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <TextBox Width="160" Height="20" VerticalContentAlignment="Center"
@@ -1293,25 +1326,36 @@
 
                         <!-- Progress Slider -->
                         <Grid Grid.Row="1" Margin="0,5,10,5">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="50"/>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="50"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="{Binding CurrentPositionFormatted}" VerticalAlignment="Center"/>
-                            <ProgressBar Grid.Column="1"
-                                    x:Name="ProgressBar"
-                                    Minimum="0" Maximum="100"
-                                    Value="{Binding SliderValue, Mode=OneWay}"
+                            <TextBlock Grid.Column="0" Text="{Binding AudiblePositionFormatted}" VerticalAlignment="Center"/>
+                            <controls:WaveformSeekBar Grid.Column="1" x:Name="SeekBar"
+                                    Maximum="100"
+                                    Waveform="{Binding Waveform}"
+                                    DrawStyle="{Binding WaveformStyle}"
+                                    IsPlaying="{Binding IsPlaying}"
+                                    Value="{Binding SliderValue, Mode=TwoWay}"
+                                    IsDragging="{Binding IsSliderDragging, Mode=TwoWay}"
                                     Margin="10,0"
-                                    Height="20"
-                                    Cursor="Hand"
-                                    MouseLeftButtonDown="ProgressBar_MouseLeftButtonDown"/>
+                                    Height="40"/>
                             <TextBlock Grid.Column="2" Text="{Binding TotalDurationFormatted}" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+                            <ComboBox Grid.Row="1" Grid.Column="1" HorizontalAlignment="Right"
+                                      Margin="10,1,10,0" FontSize="10" Height="18" Width="72"
+                                      Padding="4,0" VerticalContentAlignment="Center"
+                                      ItemsSource="{Binding WaveformStyles}"
+                                      SelectedItem="{Binding WaveformStyle, Mode=TwoWay}"
+                                      ToolTip="Waveform style"/>
                         </Grid>
 
                         <!-- Control Buttons and Volume -->
-                        <Grid Grid.Row="2" Margin="0,10,10,5">
+                        <Grid Grid.Row="2" Margin="0,2,10,5">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -1321,7 +1365,25 @@
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left">
-                                <Button Command="{Binding ToggleShuffleCommand}" ToolTip="Shuffle" Content="&#x1F500;">
+                                <Button Click="DropdownButton_Click" ToolTip="Shuffle">
+                                    <Button.Content>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="&#xE8B1;" FontFamily="Segoe MDL2 Assets" FontSize="16" FontWeight="Normal" VerticalAlignment="Center"/>
+                                            <TextBlock Text="&#xE70D;" FontFamily="Segoe MDL2 Assets" FontSize="7" FontWeight="Normal" Margin="3,0,0,0" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Button.Content>
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Off" Command="{Binding SetShuffleCommand}" CommandParameter="False" IsCheckable="False"
+                                                      IsChecked="{Binding ShuffleEnabled, Mode=OneWay, Converter={StaticResource EqualsConverter}, ConverterParameter=False}"/>
+                                            <MenuItem Header="Shuffle (least played first)" Command="{Binding SetShuffleCommand}" CommandParameter="True" IsCheckable="False"
+                                                      IsChecked="{Binding ShuffleEnabled, Mode=OneWay, Converter={StaticResource EqualsConverter}, ConverterParameter=True}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8B1;" FontFamily="Segoe MDL2 Assets"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
                                             <Setter Property="Foreground" Value="#BBBBBB"/>
@@ -1355,10 +1417,51 @@
                                 </Button>
                                 <Button Content="&#9632;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding StopCommand}" ToolTip="Stop"/>
+                                <Button Command="{Binding ToggleStopAfterCurrentCommand}" ToolTip="Stop after current track">
+                                    <Button.Content>
+                                        <Path Width="17" Height="10" Stretch="Fill"
+                                              Data="M0,0 L7,5 L0,10 Z M10,0 L17,0 L17,10 L10,10 Z"
+                                              Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                    </Button.Content>
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
+                                            <Setter Property="Foreground" Value="#BBBBBB"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding StopAfterCurrent}" Value="True">
+                                                    <Setter Property="Background" Value="#90CAF9"/>
+                                                    <Setter Property="Foreground" Value="Black"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                                 <Button Content="&#9654;&#9654;" Style="{StaticResource PlayerButtonStyle}"
                                         Command="{Binding NextCommand}" ToolTip="Next"/>
-                                <Button Command="{Binding CycleRepeatCommand}" ToolTip="Repeat"
-                                        Content="{Binding RepeatGlyph}">
+                                <Button Click="DropdownButton_Click" ToolTip="Repeat">
+                                    <Button.Content>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding RepeatGlyph}" FontFamily="Segoe MDL2 Assets" FontSize="16" FontWeight="Normal" VerticalAlignment="Center"/>
+                                            <TextBlock Text="&#xE70D;" FontFamily="Segoe MDL2 Assets" FontSize="7" FontWeight="Normal" Margin="3,0,0,0" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Button.Content>
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Off" Command="{Binding SetRepeatCommand}" CommandParameter="Off" IsCheckable="False"
+                                                      IsChecked="{Binding Repeat, Mode=OneWay, Converter={StaticResource EqualsConverter}, ConverterParameter=Off}"/>
+                                            <MenuItem Header="Repeat all" Command="{Binding SetRepeatCommand}" CommandParameter="All" IsCheckable="False"
+                                                      IsChecked="{Binding Repeat, Mode=OneWay, Converter={StaticResource EqualsConverter}, ConverterParameter=All}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8EE;" FontFamily="Segoe MDL2 Assets"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Repeat one" Command="{Binding SetRepeatCommand}" CommandParameter="One" IsCheckable="False"
+                                                      IsChecked="{Binding Repeat, Mode=OneWay, Converter={StaticResource EqualsConverter}, ConverterParameter=One}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8ED;" FontFamily="Segoe MDL2 Assets"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
                                             <Setter Property="Foreground" Value="#BBBBBB"/>
@@ -1370,21 +1473,7 @@
                                             </Style.Triggers>
                                         </Style>
                                     </Button.Style>
-                                </Button>
-                                <Button Command="{Binding StartKaraokeCommand}" ToolTip="Karaoke" Content="&#x1F3A4;">
-                                    <Button.Style>
-                                        <Style TargetType="Button" BasedOn="{StaticResource PlayerButtonStyle}">
-                                            <Setter Property="Foreground" Value="#BBBBBB"/>
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding KaraokeMode}" Value="True">
-                                                    <Setter Property="Background" Value="#90CAF9"/>
-                                                    <Setter Property="Foreground" Value="Black"/>
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Button.Style>
-                                </Button>
-                            </StackPanel>
+                                </Button>                            </StackPanel>
 
                             <!-- Remote playback indicator + kill switch (click to take audio back to this PC) -->
                             <Button Grid.Column="1" Command="{Binding ExitRemoteSinkCommand}"

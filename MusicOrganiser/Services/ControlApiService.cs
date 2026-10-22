@@ -128,13 +128,36 @@ public class ControlApiService : IDisposable
                 await WriteJson(ctx, new { ok = true });
                 break;
             case ("POST", "/playback/shuffle"):
-                OnUi(() => _vm.ToggleShuffleCommand.Execute(null));
+            {
+                var body = await ReadBody(req);
+                if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("enabled", out var en)
+                    && (en.ValueKind == JsonValueKind.True || en.ValueKind == JsonValueKind.False))
+                {
+                    var on = en.GetBoolean();
+                    OnUi(() => _vm.SetShuffleCommand.Execute(on ? "True" : "False"));
+                }
+                else OnUi(() => _vm.ToggleShuffleCommand.Execute(null));
+                await WriteJson(ctx, new { ok = true });
+                break;
+            }
+            case ("POST", "/playback/stop-after-current"):
+                OnUi(() => _vm.ToggleStopAfterCurrentCommand.Execute(null));
                 await WriteJson(ctx, new { ok = true });
                 break;
             case ("POST", "/playback/repeat"):
-                OnUi(() => _vm.CycleRepeatCommand.Execute(null));
+            {
+                var body = await ReadBody(req);
+                var mode = GetStr(body, "mode");
+                if (mode == null) OnUi(() => _vm.CycleRepeatCommand.Execute(null));
+                else
+                {
+                    var arg = mode.ToLowerInvariant() switch { "off" => "Off", "all" => "All", "one" => "One", _ => null };
+                    if (arg == null) { await WriteError(ctx, "mode must be off, all or one", 400); break; }
+                    OnUi(() => _vm.SetRepeatCommand.Execute(arg));
+                }
                 await WriteJson(ctx, new { ok = true });
                 break;
+            }
             case ("POST", "/playback/seek"):
             {
                 var body = await ReadBody(req);
@@ -274,6 +297,26 @@ public class ControlApiService : IDisposable
             case ("GET", "/file/art"):
                 await ServeArtAsync(ctx, req.QueryString["path"], req.QueryString["i"]);
                 break;
+            // Waveform for the phone's seek bar: peaks (heights) + low/mid/high band levels + tempo (BPM) / beat strength + spectrum (8 band rows), 1000 bytes
+            // (0-255) each, cached in the DB. Computes on a miss (a few seconds on a long FLAC); all null when it can't.
+            case ("GET", "/file/waveform"):
+            {
+                var p = req.QueryString["path"];
+                if (string.IsNullOrWhiteSpace(p)) { await WriteError(ctx, "path required", 400); break; }
+                var wf = await WaveformService.GetAsync(p, CancellationToken.None);
+                await WriteJson(ctx, new
+                {
+                    peaks = wf?.Peaks.Select(b => (int)b).ToArray(),
+                    low = wf?.Low.Select(b => (int)b).ToArray(),
+                    mid = wf?.Mid.Select(b => (int)b).ToArray(),
+                    high = wf?.High.Select(b => (int)b).ToArray(),
+                    tempo = wf?.Tempo.Select(b => (int)b).ToArray(),
+                    beat = wf?.Beat.Select(b => (int)b).ToArray(),
+                    spectrum = wf == null ? null : Enumerable.Range(0, WaveformService.SpectrumBands)
+                        .Select(r => wf.Spectrum.Skip(r * WaveformService.Buckets).Take(WaveformService.Buckets).Select(b => (int)b).ToArray()).ToArray()
+                });
+                break;
+            }
             case ("GET", "/file/audio"):
                 await ServeAudioAsync(ctx, req.QueryString["path"], req.QueryString["bitrate"]);
                 break;
@@ -507,7 +550,7 @@ public class ControlApiService : IDisposable
                     _vm.SelectedPlaylist = pl;
                     _vm.LoadPlaylist(pl);
                     if (_vm.MusicFiles.Count == 0) return false;
-                    _vm.PlayFileCommand.Execute(_vm.MusicFiles[0]);
+                    _vm.PlayFileCommand.Execute(_vm.QueueOrder()[0]);
                     return true;
                 });
                 await WriteJson(ctx, new { success = ok });
@@ -567,6 +610,18 @@ public class ControlApiService : IDisposable
             case ("POST", "/file/copy"):
                 await FileOp(ctx, req, (src, dst) => _vm.FileOperations.CopyFileAsync(src, dst), needsDest: true);
                 break;
+            case ("POST", "/file/convert-mp3"):
+                await AudioToolOp(ctx, req, async path =>
+                    new { success = true, output = await OnUiAsync(() => _vm.ConvertToMp3Async(path)) });
+                break;
+            case ("POST", "/file/split-cue"):
+                // Cue is auto-located only (no cue upload from the phone).
+                await AudioToolOp(ctx, req, async path =>
+                {
+                    var files = await OnUiAsync(() => _vm.SplitByCueAsync(path));
+                    return new { success = true, count = files.Count, files };
+                });
+                break;
             case ("POST", "/file/move"):
                 // VM-level move, same as delete: moving the playing track away advances the
                 // desktop to the next one instead of stopping the music.
@@ -577,9 +632,67 @@ public class ControlApiService : IDisposable
                 // to the next one instead of stopping the music.
                 await FileOp(ctx, req, (src, _) => _vm.DeleteFileAsync(src), needsDest: false);
                 break;
-            case ("POST", "/folder/move"):
-                await FileOp(ctx, req, (src, dst) => _vm.FileOperations.MoveFolderAsync(src, dst), needsDest: true);
+            case ("GET", "/folder/similar"):
+            {
+                // Folders in destFolder with the same or a similar name as `path`, with a content comparison for the phone's picker.
+                var p = req.QueryString["path"];
+                var dest = req.QueryString["destFolder"];
+                if (string.IsNullOrWhiteSpace(p) || string.IsNullOrWhiteSpace(dest)) { await WriteError(ctx, "path and destFolder required", 400); break; }
+                var json = await Task.Run(() =>
+                {
+                    var src = FolderComparisonInfo.FromPath(p);
+                    var suggested = src.FolderName;
+                    for (var i = 1; Directory.Exists(Path.Combine(dest, suggested)); i++)
+                        suggested = $"{src.FolderName} ({i})";
+                    var folders = _vm.FileOperations.FindSimilarFolders(p, dest).Select(d =>
+                    {
+                        var info = FolderComparisonInfo.FromPath(d);
+                        var (newCount, existingCount) = FileOperationsService.CompareFolderFiles(p, d);
+                        return new { path = d, name = info.FolderName, fileCount = info.FileCount, totalSize = info.TotalSize, newCount, existingCount };
+                    }).ToList();
+                    return new
+                    {
+                        source = new { name = src.FolderName, fileCount = src.FileCount, totalSize = src.TotalSize },
+                        suggestedName = suggested,
+                        folders
+                    };
+                });
+                await WriteJson(ctx, json);
                 break;
+            }
+            case ("POST", "/folder/move"):
+            {
+                // Without `action` this is the legacy plain move. With action merge|replace (+ `target`), keep (+ `newName`) or into (+ `target`, optional `newName`)
+                // it resolves a name clash the way the desktop dialog does; clashing files are skipped and stay in the source.
+                var body = await ReadBody(req);
+                var src = GetStr(body, "path");
+                var dest = GetStr(body, "destFolder");
+                if (src == null || dest == null) { await WriteError(ctx, "path and destFolder required", 400); break; }
+                var act = GetStr(body, "action");
+                FolderDuplicateAction? fda = act switch
+                {
+                    null => null,
+                    "merge" => FolderDuplicateAction.Merge,
+                    "replace" => FolderDuplicateAction.Replace,
+                    "keep" => FolderDuplicateAction.KeepBoth,
+                    "into" => FolderDuplicateAction.IntoTarget,
+                    _ => FolderDuplicateAction.Cancel
+                };
+                if (fda == FolderDuplicateAction.Cancel) { await WriteError(ctx, "unknown action", 400); break; }
+                var target = GetStr(body, "target");
+                var ok = await OnUiAsync(async () =>
+                {
+                    if (fda == null) return await _vm.FileOperations.MoveFolderAsync(src, dest);
+                    // "into": moved as a subfolder of `target` (optional newName, default the source name)
+                    var done = fda == FolderDuplicateAction.IntoTarget
+                        ? target != null && await _vm.FileOperations.TransferFolderAsync(src, target, true, FolderDuplicateAction.KeepBoth, null, GetStr(body, "newName"), null)
+                        : await _vm.FileOperations.TransferFolderAsync(src, dest, true, fda.Value, target, GetStr(body, "newName"), null);
+                    if (done && fda == FolderDuplicateAction.Replace && target != null) _vm.RemoveRecentPlayedFolderTree(target);
+                    return done;
+                });
+                await WriteJson(ctx, new { success = ok });
+                break;
+            }
             case ("POST", "/folder/delete"):
                 await FileOp(ctx, req, async (src, _) =>
                 {
@@ -614,6 +727,21 @@ public class ControlApiService : IDisposable
         await WriteJson(ctx, new { success = ok });
     }
 
+    // Convert / split: blocks until the encode is done (the phone waits with a long timeout). The encode
+    // runs on a pool thread inside the VM; OnUiAsync only holds the UI thread for the synchronous start
+    // and the grid refresh afterwards, not for the work. Failures come back as {success:false,error}.
+    private async Task AudioToolOp(HttpListenerContext ctx, HttpListenerRequest req,
+        Func<string, Task<object>> op)
+    {
+        var body = await ReadBody(req);
+        var path = GetStr(body, "path");
+        if (path == null) { await WriteError(ctx, "path required", 400); return; }
+        object result;
+        try { result = await op(path); }
+        catch (Exception ex) { result = new { success = false, error = ex.Message }; }
+        await WriteJson(ctx, result);
+    }
+
     private object BuildStatus()
     {
         return OnUi(() =>
@@ -633,6 +761,9 @@ public class ControlApiService : IDisposable
                     synced = GetLyricsFlags(np.FullPath).Synced,
                 },
                 positionSec = (int)_vm.CurrentPosition.TotalSeconds,
+                // Precise clocks straight from the player: read position vs what the device has played.
+                readPositionMs = (long)_vm.AudioPlayer.CurrentPosition.TotalMilliseconds,
+                audiblePositionMs = (long)_vm.AudioPlayer.AudiblePosition.TotalMilliseconds,
                 durationSec = (int)_vm.TotalDuration.TotalSeconds,
                 isPlaying = _vm.IsPlaying,
                 isPaused = _vm.AudioPlayer.IsPaused,
@@ -642,6 +773,7 @@ public class ControlApiService : IDisposable
                 currentFolder = _vm.IsPlaylistView ? "" : _vm.CurrentFolderPath,
                 shuffle = _vm.ShuffleEnabled,
                 repeat = _vm.Repeat.ToString().ToLowerInvariant(),
+                stopAfterCurrent = _vm.StopAfterCurrent,
             };
         });
     }

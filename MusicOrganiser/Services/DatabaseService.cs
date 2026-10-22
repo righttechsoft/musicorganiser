@@ -50,6 +50,7 @@ public sealed class DatabaseService
             ExecRaw(conn, "PRAGMA foreign_keys=ON;");
             ExecRaw(conn, SchemaSql);
             MigratePlaylistColumns(conn);
+            MigrateId3v1Mojibake(conn);
             IsReady = true;
         }
         catch
@@ -87,6 +88,23 @@ public sealed class DatabaseService
         {
             try { ExecRaw(conn, ddl); } catch { /* column already exists */ }
         }
+    }
+
+    private static void MigrateId3v1Mojibake(SqliteConnection conn)
+    {
+        try
+        {
+            using var ver = conn.CreateCommand();
+            ver.CommandText = "PRAGMA user_version;";
+            if (Convert.ToInt64(ver.ExecuteScalar()) >= 2) return;
+
+            using var upd = conn.CreateCommand();
+            upd.CommandText = "UPDATE files SET file_size = -1 WHERE title GLOB @p OR artist GLOB @p OR album GLOB @p OR genre GLOB @p";
+            upd.Parameters.AddWithValue("@p", "*[\u0080-\u00FF]*");
+            upd.ExecuteNonQuery();
+            ExecRaw(conn, "PRAGMA user_version = 2;");
+        }
+        catch { }
     }
 
     // ---------------------------------------------------------------- Files
@@ -1230,6 +1248,47 @@ public sealed class DatabaseService
         UpdatedUtc = r.IsDBNull(5) ? null : ParseTime(r.GetString(5))
     };
 
+    // -------------------------------------------------------------- Waveforms
+
+    /// <summary>Cached waveform (peaks|low|mid|high|tempo|beat|8 spectrum rows, 14000 bytes) for a track, with the file size/mtime they were computed
+    /// from (the caller decides whether they are still valid). Null on miss or failure.</summary>
+    public (long Size, long Mtime, byte[] Data)? GetWaveform(string fullPath)
+    {
+        if (!IsReady) return null;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT size, mtime, data FROM waveforms_v7 WHERE path = $p;";
+            cmd.Parameters.AddWithValue("$p", fullPath);
+            using var r = cmd.ExecuteReader();
+            if (!r.Read() || r.IsDBNull(2)) return null;
+            return (r.GetInt64(0), r.GetInt64(1), (byte[])r.GetValue(2));
+        }
+        catch { return null; }
+    }
+
+    public void SaveWaveform(string fullPath, long size, long mtime, byte[] data)
+    {
+        if (!IsReady) return;
+        try
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO waveforms_v7 (path, size, mtime, data)
+                VALUES ($p, $size, $mtime, $data)
+                ON CONFLICT(path) DO UPDATE SET
+                    size=excluded.size, mtime=excluded.mtime, data=excluded.data;";
+            cmd.Parameters.AddWithValue("$p", fullPath);
+            cmd.Parameters.AddWithValue("$size", size);
+            cmd.Parameters.AddWithValue("$mtime", mtime);
+            cmd.Parameters.AddWithValue("$data", data);
+            cmd.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
     // --------------------------------------------------------------- Helpers
 
     private static (string table, string linkTable, string idCol) TagTables(string kind)
@@ -1366,6 +1425,18 @@ public sealed class DatabaseService
             source      TEXT,
             synced      INTEGER NOT NULL DEFAULT 0,
             updated_utc TEXT
+        );
+        DROP TABLE IF EXISTS waveforms;   -- superseded by waveforms_v7
+        DROP TABLE IF EXISTS waveforms_v2;
+        DROP TABLE IF EXISTS waveforms_v3;
+        DROP TABLE IF EXISTS waveforms_v4;
+        DROP TABLE IF EXISTS waveforms_v5;
+        DROP TABLE IF EXISTS waveforms_v6;
+        CREATE TABLE IF NOT EXISTS waveforms_v7 (
+            path  TEXT PRIMARY KEY,
+            size  INTEGER,
+            mtime INTEGER,
+            data  BLOB
         );
         CREATE INDEX IF NOT EXISTS ix_files_folder    ON files(folder_path);
         CREATE INDEX IF NOT EXISTS ix_folders_parent  ON folders(parent_path);

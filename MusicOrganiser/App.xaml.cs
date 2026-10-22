@@ -37,6 +37,7 @@ public partial class App : Application
             return;
         }
 
+        MusicOrganiser.Services.LegacyTagEncoding.Install();
         base.OnStartup(e);
     }
 

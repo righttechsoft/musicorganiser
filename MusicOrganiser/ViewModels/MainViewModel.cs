@@ -39,6 +39,7 @@ public class MainViewModel : ViewModelBase, IDisposable
     private TimeSpan _totalDuration;
     private bool _isPlaying;
     private double _sliderValue;
+    private TimeSpan _audiblePosition;
     private bool _isSliderDragging;
     private bool _disposed;
     private bool _stoppedByUser;
@@ -53,6 +54,8 @@ public class MainViewModel : ViewModelBase, IDisposable
     private int _albumCoverIndex;
     private System.Windows.Threading.DispatcherTimer? _albumCoverTimer;
     private CancellationTokenSource? _albumCoverCts;
+    private CancellationTokenSource? _waveformCts;
+    private Services.Waveform? _waveform;
     private OutputDeviceItem? _selectedOutputDevice;
     private bool _remoteSink;
     // Last bitrate the phone requested; used to prewarm the transcode cache.
@@ -87,8 +90,8 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ObservableCollection<Playlist> Playlists { get; } = new();
 
     // Grid text/rating filter — a display-only CollectionView over MusicFiles. MusicFiles
-    // itself stays the full playback queue (see MoveEntry/GetAdjacent, which index/iterate it
-    // directly), so filtering must never remove items from it — only hide them in the grid.
+    // itself stays the full playback queue, so filtering must never remove items from it - only
+    // hide them in the grid. Playback follows the grid's sort (QueueOrder) but not its filter.
     private readonly ICollectionView _musicFilesView;
     public ICollectionView MusicFilesView => _musicFilesView;
 
@@ -196,7 +199,14 @@ public class MainViewModel : ViewModelBase, IDisposable
     }
 
     public bool RepeatActive => _repeat != RepeatMode.Off;
-    public string RepeatGlyph => _repeat == RepeatMode.One ? "\U0001F502" : "\U0001F501"; // 🔂 / 🔁
+    public string RepeatGlyph => _repeat == RepeatMode.One ? "\uE8ED" : "\uE8EE"; // Segoe MDL2: RepeatOne / RepeatAll
+
+    private bool _stopAfterCurrent;
+    public bool StopAfterCurrent
+    {
+        get => _stopAfterCurrent;
+        set => SetProperty(ref _stopAfterCurrent, value);
+    }
 
     public string CurrentFolderPath
     {
@@ -221,13 +231,26 @@ public class MainViewModel : ViewModelBase, IDisposable
         get => _currentPosition;
         set
         {
-            if (SetProperty(ref _currentPosition, value))
+            SetProperty(ref _currentPosition, value);
+        }
+    }
+
+    // What is audible now (device clock), as opposed to CurrentPosition, which is the READ
+    // position and leads the speaker by the resampler + WASAPI buffers. Drives the seek bar
+    // playhead and the elapsed label only; lyrics and /status stay on CurrentPosition.
+    public TimeSpan AudiblePosition
+    {
+        get => _audiblePosition;
+        set
+        {
+            if (SetProperty(ref _audiblePosition, value))
             {
                 if (!_isSliderDragging && TotalDuration.TotalSeconds > 0)
                 {
                     _sliderValue = value.TotalSeconds / TotalDuration.TotalSeconds * 100;
                     OnPropertyChanged(nameof(SliderValue));
                 }
+                OnPropertyChanged(nameof(AudiblePositionFormatted));
             }
         }
     }
@@ -313,6 +336,20 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
+    public List<WaveformStyle> WaveformStyles { get; } = Enum.GetValues<WaveformStyle>().ToList();
+
+    public WaveformStyle WaveformStyle
+    {
+        get => _appSettings.WaveformStyle;
+        set
+        {
+            if (_appSettings.WaveformStyle == value) return;
+            _appSettings.WaveformStyle = value;
+            _appSettings.Save();
+            OnPropertyChanged(nameof(WaveformStyle));
+        }
+    }
+
     public OutputDeviceItem? SelectedOutputDevice
     {
         get => _selectedOutputDevice;
@@ -362,6 +399,7 @@ public class MainViewModel : ViewModelBase, IDisposable
                 var newPosition = TimeSpan.FromSeconds(value / 100 * TotalDuration.TotalSeconds);
                 _currentPosition = newPosition;
                 OnPropertyChanged(nameof(CurrentPosition));
+                OnPropertyChanged(nameof(AudiblePositionFormatted));
             }
         }
     }
@@ -379,7 +417,17 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
     }
 
+    // Loudness peaks (one byte per bucket) of the playing track for the waveform seek bar;
+    // null while loading / when it cannot be computed.
+    public Services.Waveform? Waveform
+    {
+        get => _waveform;
+        private set => SetProperty(ref _waveform, value);
+    }
+
     public string CurrentPositionFormatted => FormatTime(CurrentPosition);
+    // Elapsed label next to the seek bar: the scrub preview while dragging, else the audible time.
+    public string AudiblePositionFormatted => FormatTime(_isSliderDragging ? _currentPosition : _audiblePosition);
     public string TotalDurationFormatted => FormatTime(TotalDuration);
 
     private bool _isLoadingFiles;
@@ -387,6 +435,16 @@ public class MainViewModel : ViewModelBase, IDisposable
     {
         get => _isLoadingFiles;
         set => SetProperty(ref _isLoadingFiles, value);
+    }
+
+    // Audio tools (convert / split) running in the background: drives a small overlay on the grid.
+    private int _toolJobs;
+    private string _toolStatus = "";
+    public bool IsToolBusy => _toolJobs > 0;
+    public string ToolStatus
+    {
+        get => _toolStatus;
+        private set => SetProperty(ref _toolStatus, value);
     }
 
     public string ArtistSummary
@@ -594,6 +652,9 @@ public class MainViewModel : ViewModelBase, IDisposable
     public ICommand RefreshArtistInfoCommand { get; }
     public ICommand ToggleShuffleCommand { get; }
     public ICommand CycleRepeatCommand { get; }
+    public ICommand SetShuffleCommand { get; }
+    public ICommand SetRepeatCommand { get; }
+    public ICommand ToggleStopAfterCurrentCommand { get; }
     public ICommand PlayFolderCommand { get; }
     public ICommand ExitRemoteSinkCommand { get; }
     public ICommand FindLyricsCommand { get; }
@@ -662,6 +723,9 @@ public class MainViewModel : ViewModelBase, IDisposable
         RefreshArtistInfoCommand = new RelayCommand(RefreshArtistInfo);
         ToggleShuffleCommand = new RelayCommand(() => ShuffleEnabled = !ShuffleEnabled);
         CycleRepeatCommand = new RelayCommand(CycleRepeat);
+        SetShuffleCommand = new RelayCommand(p => ShuffleEnabled = bool.Parse((string)p!));
+        SetRepeatCommand = new RelayCommand(p => Repeat = Enum.Parse<RepeatMode>((string)p!));
+        ToggleStopAfterCurrentCommand = new RelayCommand(() => StopAfterCurrent = !StopAfterCurrent);
         PlayFolderCommand = new RelayCommand(p => _ = PlayFolderTreeAsync((p as FolderNode)?.FullPath));
         // Desktop-side kill switch for remote-sink mode (phone is the audio sink).
         ExitRemoteSinkCommand = new RelayCommand(() => RemoteSink = false);
@@ -855,10 +919,11 @@ public class MainViewModel : ViewModelBase, IDisposable
 
         if (MusicFiles.Count > 0)
         {
-            SelectedFile = MusicFiles[0];
-            PlayFile(MusicFiles[0]);
+            var first = QueueOrder()[0];
+            SelectedFile = first;
+            PlayFile(first);
             // Cover comes from the playing track's folder (the clicked folder may hold only subfolders).
-            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(MusicFiles[0].FullPath) ?? folderPath, MusicFiles[0].FullPath);
+            _ = LoadAlbumCoverAsync(Path.GetDirectoryName(first.FullPath) ?? folderPath, first.FullPath);
         }
         }
         finally
@@ -885,6 +950,26 @@ public class MainViewModel : ViewModelBase, IDisposable
             return;
         _albumCoverIndex = (_albumCoverIndex + 1) % _albumCovers.Count;
         AlbumCover = _albumCovers[_albumCoverIndex];
+    }
+
+    private async Task LoadWaveformAsync(string path)
+    {
+        _waveformCts?.Cancel();
+        _waveformCts = new CancellationTokenSource();
+        var token = _waveformCts.Token;
+
+        Waveform = null;   // never show the previous track's shape under the new one
+        bool done = false;
+        // Progress<T> built on the UI thread posts back to it; partials stop once the final lands.
+        var progress = new Progress<Services.Waveform>(p =>
+        {
+            if (!token.IsCancellationRequested && !done) Waveform = p;
+        });
+
+        var result = await WaveformService.GetAsync(path, token, progress);
+        done = true;
+        if (token.IsCancellationRequested || result == null) return;
+        Waveform = result;
     }
 
     private async Task LoadAlbumCoverAsync(string folderPath, string? filePath)
@@ -1066,7 +1151,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
 
         if (SelectedFile == null && MusicFiles.Count > 0)
-            SelectedFile = MusicFiles[0];
+            SelectedFile = QueueOrder()[0];
     }
 
     // Persist rating/tag edits made on a track back to the SQLite cache.
@@ -1115,6 +1200,15 @@ public class MainViewModel : ViewModelBase, IDisposable
 
             // Cover follows the track: its embedded art wins over the folder's images.
             _ = LoadAlbumCoverAsync(Path.GetDirectoryName(file.FullPath) ?? "", file.FullPath);
+
+            // Waveform seek bar: this track's loudness chart, and warm the next one's.
+            _ = LoadWaveformAsync(file.FullPath);
+            // ponytail: under shuffle the next track isn't knowable (PickLeastPlayed is random), so no prewarm there.
+            if (!_shuffleEnabled)
+            {
+                var upcoming = GetAdjacent(file, +1, _repeat == RepeatMode.All);
+                if (upcoming != null) WaveformService.Prewarm(upcoming.FullPath);
+            }
 
             // Phone is the sink: warm the transcode cache for THIS track and the NEXT one,
             // so the phone's stream request (and the upcoming track change) serve instantly.
@@ -1678,6 +1772,7 @@ public class MainViewModel : ViewModelBase, IDisposable
         _audioPlayer.Stop();
         IsPlaying = false;
         CurrentPosition = TimeSpan.Zero;
+        AudiblePosition = TimeSpan.Zero;
     }
 
     private void Previous()
@@ -1710,6 +1805,70 @@ public class MainViewModel : ViewModelBase, IDisposable
     /// the next one takes over rather than the music stopping with it.</summary>
     public Task<bool> MoveFileAsync(string path, string destFolder) =>
         LeaveQueueAsync(path, () => FileOperations.MoveFileAsync(path, destFolder), destFolder);
+
+    /// <summary>Converts a track to an MP3 next to it; returns the new path. Only reads the source, so the
+    /// playing track is fine. Throws on failure (message is user-presentable).</summary>
+    public Task<string> ConvertToMp3Async(string path) =>
+        RunAudioToolAsync($"Converting {Path.GetFileName(path)} to MP3...", path,
+            () => AudioToolsService.ConvertToMp3(path));
+
+    /// <summary>Cuts an album image into per-track FLACs next to it using its .cue (auto-located when
+    /// <paramref name="cuePath"/> is null); returns the created paths.</summary>
+    public Task<List<string>> SplitByCueAsync(string path, string? cuePath = null) =>
+        RunAudioToolAsync($"Splitting {Path.GetFileName(path)} by .cue...", path,
+            () => AudioToolsService.SplitByCue(path, cuePath));
+
+    // Same grid overlay for folder copy/move/delete: just shows the status while the awaited work runs
+    // (no folder reconcile afterwards). Call from the UI thread.
+    public async Task<T> RunWithBusyOverlayAsync<T>(string status, Func<Task<T>> work)
+    {
+        _toolJobs++;
+        ToolStatus = status;
+        OnPropertyChanged(nameof(IsToolBusy));
+        try { return await work(); }
+        finally
+        {
+            _toolJobs--;
+            OnPropertyChanged(nameof(IsToolBusy));
+        }
+    }
+
+    // Call from the UI thread. The work runs on a pool thread; afterwards the folder is reconciled
+    // (also after a failure: a split that died midway leaves its finished tracks behind).
+    private async Task<T> RunAudioToolAsync<T>(string status, string sourcePath, Func<T> work)
+    {
+        _toolJobs++;
+        ToolStatus = status;
+        OnPropertyChanged(nameof(IsToolBusy));
+        try { return await Task.Run(work); }
+        finally
+        {
+            _toolJobs--;
+            OnPropertyChanged(nameof(IsToolBusy));
+            await RefreshFolderAfterToolAsync(Path.GetDirectoryName(sourcePath) ?? string.Empty);
+        }
+    }
+
+    // New files must show up WITHOUT rebuilding the queue under the playing track, so this goes through
+    // the cache refresh + ReconcileMusicFiles (which keeps existing instances), never LoadFolder. Reconcile
+    // drops rows absent from the folder listing, so it is only used when the grid really is that one folder
+    // (not a playlist, not a recursive tree queue); otherwise the cache is just refreshed in the background.
+    private async Task RefreshFolderAfterToolAsync(string folder)
+    {
+        static bool Same(string? a, string? b) => string.Equals(
+            Path.TrimEndingDirectorySeparator(a ?? ""), Path.TrimEndingDirectorySeparator(b ?? ""),
+            StringComparison.OrdinalIgnoreCase);
+        bool GridIsFolder() => !IsPlaylistView && Same(CurrentFolderPath, folder) &&
+                               MusicFiles.All(f => Same(Path.GetDirectoryName(f.FullPath), folder));
+        try
+        {
+            if (folder.Length == 0) return;
+            if (!GridIsFolder()) { LibraryCacheService.Instance.Enqueue(folder); return; }
+            var fresh = await LibraryCacheService.Instance.RefreshFolderFilesAsync(folder, CancellationToken.None);
+            if (GridIsFolder()) ReconcileMusicFiles(fresh, folder);   // user may have navigated away meanwhile
+        }
+        catch { /* the cache worker will catch up */ }
+    }
 
     /// <summary>Runs a file operation that takes <paramref name="path"/> out of the current queue
     /// (delete or move) and keeps the music going: if it is the *playing* track, the queue's next
@@ -1758,6 +1917,7 @@ public class MainViewModel : ViewModelBase, IDisposable
                 NowPlaying = null;
                 IsPlaying = false;
                 CurrentPosition = TimeSpan.Zero;
+                AudiblePosition = TimeSpan.Zero;
             }
         }
         return true;
@@ -1768,9 +1928,10 @@ public class MainViewModel : ViewModelBase, IDisposable
     /// is true, otherwise returns null at the ends.</summary>
     private MusicFile? GetAdjacent(MusicFile current, int direction, bool wrap)
     {
-        int n = MusicFiles.Count;
+        var queue = QueueOrder();
+        int n = queue.Count;
         if (n == 0) return null;
-        int curIdx = MusicFiles.IndexOf(current);
+        int curIdx = queue.IndexOf(current);
         if (curIdx < 0)
         {
             // Belt-and-braces: current's instance was swapped out from under us (e.g. the file
@@ -1778,7 +1939,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             // Next/Previous/auto-advance don't just die.
             for (int i = 0; i < n; i++)
             {
-                if (MusicFiles[i].FullPath.Equals(current.FullPath, StringComparison.OrdinalIgnoreCase))
+                if (queue[i].FullPath.Equals(current.FullPath, StringComparison.OrdinalIgnoreCase))
                 {
                     curIdx = i;
                     break;
@@ -1805,7 +1966,17 @@ public class MainViewModel : ViewModelBase, IDisposable
             if (!wrap) return null;
             nidx = (nidx % n + n) % n;
         }
-        return MusicFiles[nidx];
+        return queue[nidx];
+    }
+
+    internal IList<MusicFile> QueueOrder()
+    {
+        if (_musicFilesView.SortDescriptions.Count == 0) return MusicFiles;
+        var view = new ListCollectionView(MusicFiles);
+        foreach (var s in _musicFilesView.SortDescriptions) view.SortDescriptions.Add(s);
+        var order = view.Cast<MusicFile>().ToList();
+        view.DetachFromSourceCollection();
+        return order;
     }
 
     /// <summary>Random pick among the queue's least-played tracks (persisted <see cref="MusicFile.PlayCount"/>),
@@ -1924,6 +2095,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             {
                 CurrentPosition = pos;
                 OnPropertyChanged(nameof(CurrentPositionFormatted));
+                AudiblePosition = _audioPlayer.AudiblePosition;
             }
 
             if (HasSyncedLyrics)
@@ -1943,6 +2115,12 @@ public class MainViewModel : ViewModelBase, IDisposable
         }
 
         if (NowPlaying == null) return;
+
+        if (StopAfterCurrent)
+        {
+            StopAfterCurrent = false;
+            return;
+        }
 
         // Repeat-one: replay the same track.
         // ponytail: BeginInvoke, not Invoke — PlayFile → AudioPlayerService.Play disposes the old
@@ -2057,7 +2235,7 @@ public class MainViewModel : ViewModelBase, IDisposable
             ? null
             : MusicFiles.FirstOrDefault(f =>
                 string.Equals(f.FullPath, playlist.LastFullPath, StringComparison.OrdinalIgnoreCase)))
-            ?? MusicFiles.FirstOrDefault();
+            ?? QueueOrder().FirstOrDefault();
 
         _suppressPlaylistPersist = false;
     }

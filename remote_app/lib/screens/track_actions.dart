@@ -142,6 +142,21 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
             }
             if (mounted) Navigator.pop(context);
           }),
+          if (!t.path.toLowerCase().endsWith('.mp3'))
+            _tile(Icons.audio_file_outlined, 'Convert to MP3', AppColors.text, () async {
+              final api = widget.api, onChanged = widget.onChanged;
+              final messenger = ScaffoldMessenger.of(context);
+              Navigator.pop(context);
+              await _runLong(messenger, api.convertToMp3(t.path), 'Converting to MP3…',
+                  (_) => 'Converted to MP3', onChanged);
+            }),
+          _tile(Icons.content_cut_rounded, 'Split by .cue', AppColors.text, () async {
+            final api = widget.api, onChanged = widget.onChanged;
+            final messenger = ScaffoldMessenger.of(context);
+            Navigator.pop(context);
+            await _runLong(messenger, api.splitByCue(t.path), 'Splitting by .cue…',
+                (j) => 'Split into ${j['count']} tracks', onChanged);
+          }),
           _tile(Icons.delete_outline_rounded, 'Delete', AppColors.danger, () async {
             final yes = await showDeleteConfirm(context, name: t.name, isFolder: false);
             if (yes == true) {
@@ -164,6 +179,27 @@ class _TrackActionsSheetState extends State<_TrackActionsSheet> {
             style: AppText.trackTitle.copyWith(color: color, fontWeight: FontWeight.w500)),
         onTap: onTap,
       );
+}
+
+/// Runs a long desktop job with an in-progress snackbar, then a result snackbar. Uses the
+/// messenger captured before the sheet closed, so it survives the sheet's disposal.
+Future<void> _runLong(ScaffoldMessengerState messenger, Future<Map<String, dynamic>> job, String working,
+    String Function(Map<String, dynamic>) done, Future<void> Function() onChanged) async {
+  messenger.showSnackBar(SnackBar(content: Text(working), duration: const Duration(minutes: 10)));
+  String msg;
+  try {
+    final j = await job;
+    if (j['success'] == true) {
+      msg = done(j);
+      await onChanged();
+    } else {
+      msg = (j['error'] ?? 'Failed').toString();
+    }
+  } catch (_) {
+    msg = 'Failed: no response from desktop';
+  }
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 4)));
 }
 
 void _toast(BuildContext context, String msg) {

@@ -84,6 +84,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // mirror:true also moves the desktop's folder view/queue to [path]. Pass it ONLY for
   // explicit user navigation (folder tap / Up) — so merely opening, resuming, or refreshing
   // the app never hijacks the desktop's grid/queue while it's playing another folder.
+  // Blocking, non-dismissible spinner for a long desktop job; always closed, even on error.
+  Future<T> _withSpinner<T>(String label, Future<T> job) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: AppColors.surface,
+          content: Row(children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 20),
+            Expanded(child: Text(label, style: AppText.sub.copyWith(color: AppColors.text))),
+          ]),
+        ),
+      ),
+    );
+    try {
+      return await job;
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+    }
+  }
+
   Future<void> _go(String path, {bool mirror = false}) async {
     _searchCtrl.clear();
     _debounce?.cancel();
@@ -404,9 +428,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 Navigator.pop(ctx);
                 final dest = await showMovePicker(context, api: app.api!, movingLabel: f.name);
                 if (dest != null) {
-                  final ok = await app.api!.moveFolder(f.path, dest);
+                  final similar = await _withSpinner('Checking destination…', app.api!.similarFolders(f.path, dest));
+                  if (!mounted) return;
+                  var ok = false;
+                  var msg = '';
+                  if (similar.folders.isEmpty) {
+                    ok = await _withSpinner('Moving folder…', app.api!.moveFolder(f.path, dest));
+                  } else {
+                    final choice = await showDialog<_MergeChoice>(
+                      context: context,
+                      builder: (ctx) => _MergeDialog(similar: similar),
+                    );
+                    if (choice == null) return; // cancelled: no move at all
+                    if (!mounted) return;
+                    ok = await _withSpinner(
+                        'Moving folder…',
+                        app.api!.moveFolder(f.path, dest,
+                            action: choice.action,
+                            target: choice.action == 'keep' ? null : choice.target.path,
+                            newName: choice.action == 'keep' || choice.action == 'into' ? choice.newName : null));
+                    if (ok && choice.action == 'merge' && choice.target.existingCount > 0) {
+                      msg = 'Merged. ${choice.target.existingCount} duplicate '
+                          '${choice.target.existingCount == 1 ? "file was" : "files were"} left in the source folder';
+                    }
+                  }
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? 'Moved' : 'Move failed')));
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(ok ? (msg.isEmpty ? 'Moved' : msg) : 'Move failed')));
                   }
                   _go(_path);
                 }
@@ -630,6 +678,131 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _MergeChoice {
+  final String action; // merge | replace | keep | into
+  final SimilarFolder target;
+  final String newName;
+  _MergeChoice(this.action, this.target, this.newName);
+}
+
+String _fmtSize(int b) {
+  if (b >= 1 << 30) return '${(b / (1 << 30)).toStringAsFixed(1)} GB';
+  if (b >= 1 << 20) return '${(b / (1 << 20)).toStringAsFixed(0)} MB';
+  return '${(b / 1024).toStringAsFixed(0)} KB';
+}
+
+/// Shown when the move destination already holds a folder with a similar name.
+class _MergeDialog extends StatefulWidget {
+  final SimilarFolders similar;
+  const _MergeDialog({required this.similar});
+  @override
+  State<_MergeDialog> createState() => _MergeDialogState();
+}
+
+class _MergeDialogState extends State<_MergeDialog> {
+  late SimilarFolder _target = widget.similar.folders.first;
+  late final TextEditingController _name = TextEditingController(text: widget.similar.suggestedName);
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  String _files(int n) => '$n ${n == 1 ? "file" : "files"}';
+
+  Future<void> _replace() async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        title: Text('Replace "${_target.name}"?', style: AppText.trackTitle),
+        content: Text(
+            'This permanently deletes the existing folder "${_target.name}" '
+            '(${_files(_target.fileCount)}) and moves the new one in. This cannot be undone.',
+            style: AppText.sub.copyWith(color: AppColors.text)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Cancel', style: TextStyle(color: AppColors.text))),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.danger),
+            child: const Text('Replace'),
+          ),
+        ],
+      ),
+    );
+    if (yes == true && mounted) Navigator.pop(context, _MergeChoice('replace', _target, ''));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.similar;
+    final canKeep = _name.text.trim().isNotEmpty;
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: Text('Similar folder exists', style: AppText.trackTitle),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Moving', style: AppText.sub),
+            Text(s.sourceName, style: AppText.trackTitle),
+            Text('${_files(s.sourceFileCount)} · ${_fmtSize(s.sourceTotalSize)}', style: AppText.sub),
+            const SizedBox(height: 12),
+            Text('Already in the destination', style: AppText.sub),
+            RadioGroup<SimilarFolder>(
+              groupValue: _target,
+              onChanged: (v) => setState(() => _target = v ?? _target),
+              child: Column(
+                children: [
+                  for (final c in s.folders)
+                    RadioListTile<SimilarFolder>(
+                      contentPadding: EdgeInsets.zero,
+                      value: c,
+                      title: Text(c.name, style: AppText.trackTitle.copyWith(fontWeight: FontWeight.w500)),
+                      subtitle: Text(
+                          '${_files(c.fileCount)} · ${_fmtSize(c.totalSize)}\n'
+                          '${c.newCount} new · ${c.existingCount} already there',
+                          style: AppText.sub),
+                      isThreeLine: true,
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _name,
+              onChanged: (_) => setState(() {}),
+              decoration: const InputDecoration(labelText: 'Name (for Keep both / Into folder)'),
+            ),
+          ],
+        ),
+      ),
+      actionsOverflowAlignment: OverflowBarAlignment.end,
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel', style: TextStyle(color: AppColors.text))),
+        TextButton(
+            onPressed: canKeep ? () => Navigator.pop(context, _MergeChoice('into', _target, _name.text.trim())) : null,
+            child: const Text('Into folder')),
+        TextButton(
+            onPressed: () => Navigator.pop(context, _MergeChoice('merge', _target, '')),
+            child: const Text('Merge')),
+        TextButton(
+            onPressed: _replace,
+            child: Text('Replace', style: TextStyle(color: AppColors.danger))),
+        TextButton(
+            onPressed: canKeep ? () => Navigator.pop(context, _MergeChoice('keep', _target, _name.text.trim())) : null,
+            child: const Text('Keep both')),
+      ],
     );
   }
 }

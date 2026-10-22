@@ -34,7 +34,7 @@ class NowPlaying {
 class PlayerStatus {
   final NowPlaying? nowPlaying;
   final int positionSec, durationSec, volume, systemVolume;
-  final bool isPlaying, isPaused, shuffle;
+  final bool isPlaying, isPaused, shuffle, stopAfterCurrent;
   final String repeat; // off | all | one
   final String? outputDeviceId;
   final String currentFolder; // desktop's open folder path ('' = root/playlist view)
@@ -47,6 +47,7 @@ class PlayerStatus {
     required this.isPlaying,
     required this.isPaused,
     required this.shuffle,
+    this.stopAfterCurrent = false,
     required this.repeat,
     this.outputDeviceId,
     this.currentFolder = '',
@@ -62,6 +63,7 @@ class PlayerStatus {
         isPlaying: _bool(j['isPlaying']),
         isPaused: _bool(j['isPaused']),
         shuffle: _bool(j['shuffle']),
+        stopAfterCurrent: _bool(j['stopAfterCurrent']),
         repeat: _str(j['repeat']).isEmpty ? 'off' : _str(j['repeat']),
         outputDeviceId: j['outputDeviceId'] == null ? null : _str(j['outputDeviceId']),
         currentFolder: _str(j['currentFolder']),
@@ -230,6 +232,70 @@ class TagUsage {
   TagUsage({required this.name, required this.folderCount});
   factory TagUsage.fromJson(Map<String, dynamic> j) =>
       TagUsage(name: _str(j['name']), folderCount: _int(j['folderCount']));
+}
+
+/// One existing destination folder that looks like the folder being moved (/folder/similar).
+class SimilarFolder {
+  final String path;
+  final String name;
+  final int fileCount;
+  final int totalSize;
+  final int newCount; // source files missing in this folder
+  final int existingCount; // source files already in this folder
+  SimilarFolder({
+    required this.path,
+    required this.name,
+    required this.fileCount,
+    required this.totalSize,
+    required this.newCount,
+    required this.existingCount,
+  });
+  factory SimilarFolder.fromJson(Map<String, dynamic> j) => SimilarFolder(
+        path: _str(j['path']),
+        name: _str(j['name']),
+        fileCount: _int(j['fileCount']),
+        totalSize: _int(j['totalSize']),
+        newCount: _int(j['newCount']),
+        existingCount: _int(j['existingCount']),
+      );
+}
+
+class SimilarFolders {
+  final String sourceName;
+  final int sourceFileCount;
+  final int sourceTotalSize;
+  final String suggestedName;
+  final List<SimilarFolder> folders;
+  SimilarFolders({
+    this.sourceName = '',
+    this.sourceFileCount = 0,
+    this.sourceTotalSize = 0,
+    this.suggestedName = '',
+    this.folders = const [],
+  });
+  factory SimilarFolders.fromJson(Map<String, dynamic> j) {
+    final s = j['source'] is Map ? (j['source'] as Map).cast<String, dynamic>() : <String, dynamic>{};
+    return SimilarFolders(
+      sourceName: _str(s['name']),
+      sourceFileCount: _int(s['fileCount']),
+      sourceTotalSize: _int(s['totalSize']),
+      suggestedName: _str(j['suggestedName']),
+      folders: j['folders'] is List
+          ? (j['folders'] as List).map((e) => SimilarFolder.fromJson(e as Map<String, dynamic>)).toList()
+          : <SimilarFolder>[],
+    );
+  }
+}
+
+/// Seek-bar waveform: loudness [peaks] (0-255) and optional per-band energy used to colour the bars.
+class WaveformData {
+  final List<int> peaks;
+  final List<int>? low, mid, high; // null unless all three bands are present and match peaks
+  final List<int>? tempo, beat; // null unless present and matching peaks
+  final List<List<int>>? spectrum; // 8 band rows (bass first), null unless complete
+  WaveformData(this.peaks, {this.low, this.mid, this.high, this.tempo, this.beat, this.spectrum});
+  bool get hasBands => low != null;
+  bool get hasFingerprint => low != null && tempo != null && beat != null && spectrum != null;
 }
 
 class FolderTagSuggestion {

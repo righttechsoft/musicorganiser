@@ -71,10 +71,14 @@ A companion Flutter app (`remote_app/`) controls the desktop over your local net
 
 ### File Operations
 - Copy/Move/Delete files and folders
+- **Waveform seek bar** - the position bar shows the whole track as a loudness chart, so quiet and loud parts are visible; click or drag to seek
+- **Folder conflict dialog** - copying or moving a folder to a place that already has the same or a similarly named one opens a FreeFileSync-style comparison: source and target side by side, one action per file or folder (bring in / overwrite, skip, delete from target), Merge and Replace presets, Keep both under a name you can edit, and in-place rename (F2). Unrelated folders in the target are hidden and left alone
 - **Drag & drop** — drag tracks (or a whole folder) onto any folder in the tree to move them; hold **Ctrl** to copy. Illegal drops (a folder into itself or its own subtree) are refused, and folder moves ask for confirmation
 - **New subfolder** — right-click a folder in the tree to create one
 - Recent folders menu (last 10 destinations for Copy and Move separately)
 - Confirmation dialog for delete operations
+- **Convert to MP3** - right-click one or more tracks → *Convert to MP3* writes a 320 kbps `.mp3` next to each (hi-res sources are resampled to 44.1/48 kHz, tags and cover art are copied, the original is kept, an existing file is never overwritten)
+- **Split by .cue** - right-click an album image (one long file) → *Split by .cue...* cuts it into lossless sample-exact `NN - Title.flac` tracks tagged from the cue sheet (the cue is found next to the file, or you pick it); nothing is deleted. Both work on the track that is playing, run in the background with a progress overlay, and are also in the mobile app's track menu
 - Automatically stops playback before moving/deleting playing files
 - Deleting **or moving** the track you're listening to doesn't stop the music — playback continues with the next track in the queue, whether you used the context menu, the now-playing buttons, drag & drop or the phone
 

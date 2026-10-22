@@ -43,6 +43,7 @@ class AppState extends ChangeNotifier {
 
   // Lyrics for the now-playing track only (re-fetched on track change).
   LyricsData? lyrics;
+  WaveformData? waveform; // loudness peaks (+ optional band colouring) of the now-playing track; null = none yet / unavailable
   bool loadingLyrics = false;
 
   // Local playback ("This device"): the phone streams + plays audio itself and follows
@@ -50,6 +51,7 @@ class AppState extends ChangeNotifier {
   final AudioPlayer _player = AudioPlayer();
   bool localOutput = false;
   int streamBitrate = 160000;
+  String waveformStyle = 'Bars';
   double localVolume = 100; // phone player volume (0..100) while in local output
   bool _loadingTrack = false; // true while a stream load attempt is in flight
   String? _loadedPath;        // track path currently loaded & playing on the phone
@@ -120,6 +122,7 @@ class AppState extends ChangeNotifier {
         .toList()
       ..sort((a, b) => b.lastSeenMs.compareTo(a.lastSeenMs));
     streamBitrate = sp.getInt('streamBitrate') ?? 160000;
+    waveformStyle = sp.getString('waveformStyle') ?? 'Bars';
     notifyListeners();
   }
 
@@ -218,6 +221,13 @@ class AppState extends ChangeNotifier {
     _pendingPath = null;
     notifyListeners();
     if (api != null) await api!.setDevice(id);
+  }
+
+  Future<void> setWaveformStyle(String style) async {
+    waveformStyle = style;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString('waveformStyle', style);
+    notifyListeners();
   }
 
   Future<void> setQuality(int bitrate) async {
@@ -333,6 +343,7 @@ class AppState extends ChangeNotifier {
       if (trackChanged) {
         unawaited(loadFiles());
         unawaited(_loadLyricsForTrack(s.nowPlaying));
+        unawaited(_loadWaveformForTrack(s.nowPlaying));
       }
       unawaited(_syncLocal(trackChanged: trackChanged));
     } catch (_) {
@@ -372,6 +383,17 @@ class AppState extends ChangeNotifier {
       }
     }
     return idx;
+  }
+
+  Future<void> _loadWaveformForTrack(NowPlaying? np) async {
+    waveform = null; // never show the previous track's shape
+    notifyListeners();
+    if (np == null || api == null) return;
+    final peaks = await api!.waveform(np.path);
+    if (status.nowPlaying?.path == np.path) {
+      waveform = peaks;
+      notifyListeners();
+    }
   }
 
   // Called on track change: skip the network round trip when the desktop hasn't

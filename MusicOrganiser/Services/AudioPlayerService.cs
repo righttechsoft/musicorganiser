@@ -17,11 +17,14 @@ public class AudioPlayerService : IDisposable
     // Target format of _resampler, kept so Seek can rebuild it with identical output.
     private WaveFormat? _resamplerFormat;
     private LockedSampleProvider? _lockedProvider;
+    // Level tap (before the volume stage); recreated with every output, so its frame counter shares
+    // the device clock's origin. See GetLiveLevels.
+    private LevelTap? _tap;
     // In-app gain applied at the TAIL of the pipeline (after the resampler) so volume/mute
     // changes are audible within WasapiOut's buffer (the configured OutputBufferMs) instead of after the resampler's
     // ~1s source buffer. Do not move this back onto AudioFileReader.
     private VolumeSampleProvider? _gain;
-    private AudioFileReader? _audioFile;
+    private WaveStream? _audioFile;
     private MMDevice? _selectedDevice;
     // The default-endpoint device resolved for the current playback (when no device is
     // explicitly selected). Owned here and kept alive for as long as _output uses it.
@@ -57,6 +60,56 @@ public class AudioPlayerService : IDisposable
     public string? CurrentFilePath { get; private set; }
     public TimeSpan CurrentPosition => _audioFile?.CurrentTime ?? TimeSpan.Zero;
     public TimeSpan TotalDuration => _audioFile?.TotalTime ?? TimeSpan.Zero;
+    // Audible clock. CurrentPosition is the READ position of the source, which leads the speaker by
+    // the resampler's buffer plus WASAPI's. WasapiOut.GetPosition() is bytes the device has played
+    // since this output started (frozen while paused), so audible = file time at which this output's
+    // stream began (_clockBaseSec) + played. The base is 0 after Play (every output starts at the
+    // top of the file) and is re-derived in Seek, which keeps the output running.
+    private double _clockBaseSec;
+    // After a seek the old audio still drains from the WASAPI buffer; hold the playhead at the
+    // seek target until the device clock catches up to it (null = no hold).
+    private double? _seekHoldSec;
+
+    public TimeSpan AudiblePosition
+    {
+        get
+        {
+            var cur = CurrentPosition;
+            var o = _output;
+            if (o == null || o.PlaybackState == PlaybackState.Stopped) return cur;
+            try
+            {
+                double computed = _clockBaseSec + (double)o.GetPosition() / o.OutputWaveFormat.AverageBytesPerSecond;
+                if (_seekHoldSec is double hold)
+                {
+                    if (computed >= hold) _seekHoldSec = null;
+                    else computed = hold;
+                }
+                computed = Math.Clamp(computed, 0, Math.Max(0, TotalDuration.TotalSeconds));
+                // Never ahead of what has been read.
+                return TimeSpan.FromSeconds(Math.Min(computed, cur.TotalSeconds));
+            }
+            catch { return cur; }   // output disposed mid-read / clock unavailable
+        }
+    }
+
+    // Envelope of the audio the DEVICE is playing right now: full-band level and a kick (bass onset)
+    // strength, both raw (unnormalised). The tap's ring is indexed by frames pulled since this output
+    // started and WasapiOut.GetPosition() counts the frames the device has played since the same
+    // moment, so this is in sync with what is audible; a Seek keeps the output (and tap) running.
+    public (float level, float kick) GetLiveLevels()
+    {
+        var o = _output;
+        var tap = _tap;
+        if (o == null || tap == null || o.PlaybackState != PlaybackState.Playing) return (0f, 0f);
+        try
+        {
+            long frame = o.GetPosition() / o.OutputWaveFormat.BlockAlign;
+            return tap.Lookup(frame);
+        }
+        catch { return (0f, 0f); }   // output disposed mid-read
+    }
+
     public bool IsPlaying => _output?.PlaybackState == PlaybackState.Playing;
     public bool IsPaused => _output?.PlaybackState == PlaybackState.Paused;
     public bool IsStopped => _output == null || _output.PlaybackState == PlaybackState.Stopped;
@@ -308,7 +361,7 @@ public class AudioPlayerService : IDisposable
 
         try
         {
-            _audioFile = new AudioFileReader(filePath);
+            _audioFile = OpenReader(filePath);
 
             var (device, ownsDevice) = GetActiveDevice();
             if (device == null)
@@ -328,7 +381,8 @@ public class AudioPlayerService : IDisposable
             _resamplerFormat = WaveFormat.CreateIeeeFloatWaveFormat(mixFormat.SampleRate, 2);
             _resampler = new MediaFoundationResampler(_audioFile, _resamplerFormat);
             _lockedProvider = new LockedSampleProvider(_resampler.ToSampleProvider(), _pipelineLock);
-            _gain = new VolumeSampleProvider(_lockedProvider)
+            _tap = new LevelTap(_lockedProvider);
+            _gain = new VolumeSampleProvider(_tap)
             {
                 Volume = _localMuted ? 0f : _volume
             };
@@ -341,6 +395,8 @@ public class AudioPlayerService : IDisposable
             _output.Init(outProvider);
             _output.PlaybackStopped += OnPlaybackStopped;
             _output.Play();
+            _clockBaseSec = 0;
+            _seekHoldSec = null;
             CurrentFilePath = filePath;
             _positionTimer.Start();
         }
@@ -357,6 +413,13 @@ public class AudioPlayerService : IDisposable
             throw new InvalidOperationException($"Failed to play file: {ex.Message}", ex);
         }
     }
+
+    // Media Foundation seeks inside FLAC land seconds off while reporting the requested position;
+    // FlacSeekReader makes them exact. Everything else keeps AudioFileReader (measured exact).
+    private static WaveStream OpenReader(string filePath) =>
+        filePath.EndsWith(".flac", StringComparison.OrdinalIgnoreCase)
+            ? new FlacSeekReader(filePath)
+            : new AudioFileReader(filePath);
 
     public void Resume()
     {
@@ -396,6 +459,20 @@ public class AudioPlayerService : IDisposable
             // _pipelineLock). The lock keeps the render thread's Read out during the swap.
             lock (_pipelineLock)
             {
+                // Audible clock: the output keeps running, so re-base it. What it has played so far
+                // plus what is still queued in its buffer (old audio, ~OutputBufferMs) is the stream
+                // time before the new audio reaches the speaker.
+                try
+                {
+                    var o = _output;
+                    if (o != null && o.PlaybackState != PlaybackState.Stopped)
+                    {
+                        double played = (double)o.GetPosition() / o.OutputWaveFormat.AverageBytesPerSecond;
+                        _clockBaseSec = position.TotalSeconds - (played + _outputBufferMs / 1000.0);
+                        _seekHoldSec = position.TotalSeconds;
+                    }
+                }
+                catch { _clockBaseSec = 0; _seekHoldSec = null; }
                 _audioFile.CurrentTime = position;
                 if (_resampler != null && _lockedProvider != null && _resamplerFormat != null)
                 {
@@ -427,6 +504,7 @@ public class AudioPlayerService : IDisposable
             _resampler = null;
         }
         _gain = null;
+        _tap = null;
         _lockedProvider = null;
         _resamplerFormat = null;
 
@@ -522,6 +600,70 @@ public class AudioPlayerService : IDisposable
         public int Read(float[] buffer, int offset, int count)
         {
             lock (_lock) return _src.Read(buffer, offset, count);
+        }
+    }
+
+    // Pass-through that measures ~20 ms blocks of the (stereo) stream into a ring: RMS level and a
+    // kick value (150 Hz one-pole lowpass energy, positive change vs a short running average).
+    // Audio thread: no allocation, no locks. The single writer publishes _done after filling an
+    // entry; the UI reader only trusts entries inside the last RingSize blocks (a torn read of a
+    // slot being overwritten just shows a slightly wrong pulse).
+    // ponytail: first-order kick detector on a mono mix, not a beat tracker; the ring (~10 s) must
+    // outlast the WASAPI buffer + the lookup lag, which holds up to the 1000 ms buffer cap.
+    private sealed class LevelTap : ISampleProvider
+    {
+        private const int RingSize = 512;
+        private readonly ISampleProvider _src;
+        private readonly int _blockFrames, _ch;
+        private readonly double _kickCoef;
+        private readonly float[] _level = new float[RingSize], _kick = new float[RingSize];
+        private long _done;               // completed blocks
+        private int _fill;                // frames in the block under construction
+        private double _sumSq, _kickSumSq, _lp, _avg;
+
+        public LevelTap(ISampleProvider src)
+        {
+            _src = src;
+            _ch = src.WaveFormat.Channels;
+            _blockFrames = Math.Max(1, src.WaveFormat.SampleRate / 50);
+            _kickCoef = 1 - Math.Exp(-2 * Math.PI * 150 / src.WaveFormat.SampleRate);
+        }
+
+        public WaveFormat WaveFormat => _src.WaveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int n = _src.Read(buffer, offset, count);
+            for (int i = 0; i + _ch <= n; i += _ch)
+            {
+                double x = 0;
+                for (int c = 0; c < _ch; c++) x += buffer[offset + i + c];
+                x /= _ch;
+                _sumSq += x * x;
+                _lp += _kickCoef * (x - _lp);
+                _kickSumSq += _lp * _lp;
+                if (++_fill == _blockFrames)
+                {
+                    float rms = (float)Math.Sqrt(_sumSq / _fill);
+                    double kickRms = Math.Sqrt(_kickSumSq / _fill);
+                    int slot = (int)(_done % RingSize);
+                    _level[slot] = rms;
+                    _kick[slot] = (float)Math.Max(0, kickRms - _avg);
+                    _avg += 0.2 * (kickRms - _avg);
+                    _sumSq = _kickSumSq = 0; _fill = 0;
+                    Volatile.Write(ref _done, _done + 1);
+                }
+            }
+            return n;
+        }
+
+        public (float level, float kick) Lookup(long frame)
+        {
+            long block = frame / _blockFrames;
+            long done = Volatile.Read(ref _done);
+            if (frame < 0 || block >= done || done - block >= RingSize - 2) return (0f, 0f);
+            int slot = (int)(block % RingSize);
+            return (_level[slot], _kick[slot]);
         }
     }
 
